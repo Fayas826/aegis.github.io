@@ -1,16 +1,9 @@
+import asyncio
 import base64
 import os
 from typing import List, Dict, Any
 
-try:
-    import easyocr
-except ImportError:
-    easyocr = None
-
-try:
-    import pytesseract
-except ImportError:
-    pytesseract = None
+# Eager imports of easyocr and pytesseract removed for lazy loading.
 
 from core.cognition.reasoning.brain import brain
 
@@ -24,13 +17,28 @@ class OCRProcessor:
     def _init_reader(self):
         if self._initialized:
             return
-        if easyocr is not None:
-            try:
-                # Initialize reader on demand for English
-                self.easyocr_reader = easyocr.Reader(['en'], gpu=False)
-                print("[OCR] EasyOCR local engine loaded.")
-            except Exception as e:
-                print(f"[OCR] EasyOCR init fail: {e}")
+        
+        self._easyocr_available = False
+        self._pytesseract_available = False
+
+        try:
+            import easyocr
+            import torch
+            use_gpu = bool(torch.cuda.is_available())
+            # Initialize reader on demand for English with GPU acceleration if available
+            self.easyocr_reader = easyocr.Reader(['en'], gpu=use_gpu)
+            self._easyocr_available = True
+            print(f"[OCR] EasyOCR local engine loaded (GPU={use_gpu}).")
+        except Exception as e:
+            print(f"[OCR] EasyOCR init fail: {e}")
+            self.easyocr_reader = None
+
+        try:
+            import pytesseract
+            self._pytesseract_available = True
+        except ImportError:
+            pass
+
         self._initialized = True
 
     async def extract_text_blocks(self, image_b64: str) -> List[Dict[str, Any]]:
@@ -43,10 +51,10 @@ class OCRProcessor:
         with open(temp_path, "wb") as f:
             f.write(img_bytes)
 
-        # 1. EasyOCR (Primary local choice)
+        # 1. EasyOCR (Primary local choice, offloaded to worker thread)
         if self.easyocr_reader is not None:
             try:
-                results = self.easyocr_reader.readtext(temp_path)
+                results = await asyncio.to_thread(self.easyocr_reader.readtext, temp_path)
                 blocks = []
                 for box, text, confidence in results:
                     # box format: [[x1, y1], [x2, y1], [x2, y2], [x1, y2]]
@@ -68,8 +76,9 @@ class OCRProcessor:
                 print(f"[OCR] EasyOCR run error: {e}")
 
         # 2. PyTesseract (Secondary local choice)
-        if pytesseract is not None:
+        if getattr(self, '_pytesseract_available', False):
             try:
+                import pytesseract
                 # pytesseract.image_to_data returns detailed coordinate matches
                 data = pytesseract.image_to_data(temp_path, output_type=pytesseract.Output.DICT)
                 blocks = []

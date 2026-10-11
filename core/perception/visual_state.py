@@ -1,162 +1,171 @@
+import logging
+import os
+from PIL import ImageGrab
+
 import time
+from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional
 
+logging.basicConfig(level=logging.INFO)
+
+@dataclass
 class GUIElement:
-    """Normalized representation of a GUI element detected via DOM, OCR, or Vision."""
-    def __init__(
-        self,
-        element_id: str,
-        element_type: str,
-        text: str,
-        role: str,
-        bbox: List[int], # [x1, y1, x2, y2]
-        center: List[int], # [cx, cy]
-        confidence: float = 1.0,
-        clickable: bool = True,
-        visible: bool = True,
-        source: str = "vision" # dom, accessibility, ocr, vision
-    ):
-        self.id = element_id
-        self.type = element_type
-        self.text = text
-        self.role = role
-        self.bbox = bbox
-        self.center = center
-        self.confidence = confidence
-        self.clickable = clickable
-        self.visible = visible
-        self.source = source
+    element_id: str
+    element_type: str
+    text: str = ""
+    role: str = "element"
+    bbox: List[int] = field(default_factory=lambda: [0, 0, 0, 0])
+    center: List[int] = field(default_factory=lambda: [0, 0])
+    confidence: float = 1.0
+    clickable: bool = True
+    visible: bool = True
+    source: str = "generic"
+    evidence: Dict[str, Any] = field(default_factory=dict)
 
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "id": self.id,
-            "type": self.type,
-            "text": self.text,
-            "role": self.role,
-            "bbox": self.bbox,
-            "center": self.center,
-            "confidence": self.confidence,
-            "clickable": self.clickable,
-            "visible": self.visible,
-            "source": self.source
-        }
-
+@dataclass
 class ScreenFrame:
-    """Normalized snapshot model representing a captured tactical frame (Phase 2)."""
-    def __init__(
-        self,
-        image_b64: str,
-        width: int,
-        height: int,
-        dpi_scale: float = 1.0,
-        active_window: str = "Unknown",
-        app_name: str = "Unknown",
-        window_bounds: Optional[List[int]] = None,
-        browser_context: Optional[Dict[str, Any]] = None,
-        dom_elements: Optional[List[Dict[str, Any]]] = None,
-        uia_elements: Optional[List[Dict[str, Any]]] = None,
-        ocr_elements: Optional[List[Dict[str, Any]]] = None,
-        cv_elements: Optional[List[Dict[str, Any]]] = None,
-        vlm_elements: Optional[List[Dict[str, Any]]] = None,
-        cursor_position: Optional[List[int]] = None
-    ):
-        self.screenshot = image_b64
-        self.image = image_b64
-        self.width = width
-        self.height = height
-        self.dpi_scale = dpi_scale
-        self.active_window = active_window
-        self.app_name = app_name
-        self.window_bounds = window_bounds or []
-        self.browser_context = browser_context or {}
-        self.dom_elements = dom_elements or []
-        self.uia_elements = uia_elements or []
-        self.ocr_elements = ocr_elements or []
-        self.cv_elements = cv_elements or []
-        self.vlm_elements = vlm_elements or []
-        self.cursor_position = cursor_position or [0, 0]
-        self.timestamp = time.time()
-        
-        # Legacy mappings
-        self.ocr = ocr_elements or []
-        self.gui_elements = []
+    image_b64: str = ""
+    width: int = 1920
+    height: int = 1080
+    active_window: str = "Desktop"
+    browser_context: Optional[Dict[str, Any]] = None
+    timestamp: float = field(default_factory=time.time)
+    semantic_context: str = ""
 
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "screenshot": self.screenshot,
-            "image": self.image,
-            "width": self.width,
-            "height": self.height,
-            "dpi_scale": self.dpi_scale,
-            "active_window": self.active_window,
-            "app_name": self.app_name,
-            "window_bounds": self.window_bounds,
-            "browser_context": self.browser_context,
-            "dom_elements": self.dom_elements,
-            "uia_elements": self.uia_elements,
-            "ocr_elements": self.ocr_elements,
-            "cv_elements": self.cv_elements,
-            "vlm_elements": self.vlm_elements,
-            "cursor_position": self.cursor_position,
-            "timestamp": self.timestamp
-        }
+    @property
+    def image(self) -> str:
+        return self.image_b64
 
+@dataclass
 class Action:
-    """Normalized action model representing instructions dispatched to hardware/drivers."""
-    def __init__(
-        self,
-        action_type: str, # CLICK, TYPE, SCROLL, MOVE, KEYPRESS, HOTKEY, OPEN_APP, CLOSE_APP, DRAG, SELECT, WAIT
-        target: str,
-        coords: Optional[List[int]] = None,
-        selector: Optional[str] = None,
-        text_payload: Optional[str] = None,
-        confidence: float = 1.0,
-        safety_level: str = "MEDIUM" # LOW, MEDIUM, HIGH
-    ):
-        self.action_type = action_type
-        self.target = target
-        self.coords = coords
-        self.selector = selector
-        self.text_payload = text_payload
-        self.confidence = confidence
-        self.safety_level = safety_level
-        self.timestamp = time.time()
+    action_type: str = "CLICK"
+    target: str = ""
+    coords: Optional[List[int]] = None
+    text_payload: Optional[str] = None
+    confidence: float = 1.0
+    payload: Dict[str, Any] = field(default_factory=dict)
 
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "action_type": self.action_type,
-            "target": self.target,
-            "coords": self.coords,
-            "selector": self.selector,
-            "text_payload": self.text_payload,
-            "confidence": self.confidence,
-            "safety_level": self.safety_level,
-            "timestamp": self.timestamp
-        }
-
+@dataclass
 class ActionResult:
-    """Normalized results of an action dispatch execution loop."""
-    def __init__(
-        self,
-        action: Action,
-        success: bool,
-        before_state: ScreenFrame,
-        after_state: Optional[ScreenFrame] = None,
-        error: Optional[str] = None
-    ):
-        self.action = action
-        self.success = success
-        self.before_state = before_state
-        self.after_state = after_state
-        self.error = error
-        self.timestamp = time.time()
+    status: str = "SUCCESS"
+    action_type: str = ""
+    target: Optional[Any] = None
+    detail: str = ""
+    timestamp: float = field(default_factory=time.time)
+    error: Optional[str] = None
+    success: bool = True
+    pre_validation_passed: bool = True
+    post_verification_passed: bool = True
+    verification_method: str = "n/a"
+    backend_used: str = "native"
+    latency_ms: float = 0.0
+    action: Optional[Any] = None
+    before_state: Optional[Any] = None
+    after_state: Optional[Any] = None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def __post_init__(self):
+        if self.action and not self.action_type:
+            self.action_type = getattr(self.action, "action_type", str(self.action))
+        if self.action and not self.target:
+            self.target = getattr(self.action, "target", None)
+
+    def to_dict(self) -> dict:
         return {
-            "action": self.action.to_dict(),
-            "success": self.success,
-            "before_state": self.before_state.to_dict(),
-            "after_state": self.after_state.to_dict() if self.after_state else None,
+            "status": self.status,
+            "action_type": self.action_type,
+            "target": str(self.target or ""),
+            "detail": self.detail,
+            "timestamp": self.timestamp,
             "error": self.error,
-            "timestamp": self.timestamp
+            "success": self.success,
+            "pre_validation_passed": self.pre_validation_passed,
+            "post_verification_passed": self.post_verification_passed,
+            "verification_method": self.verification_method,
+            "backend_used": self.backend_used,
+            "latency_ms": self.latency_ms,
         }
+
+
+
+
+class VisualStateParser:
+    """
+    JARVIS O.M.E.G.A. - The "Eyes"
+    Captures the current state of the screen so the ComputerUseAgent or a Vision Model
+    can determine the (X,Y) coordinates of target elements.
+    """
+    def __init__(self, output_dir: str):
+        self.output_dir = output_dir
+        if not os.path.exists(self.output_dir):
+            os.makedirs(self.output_dir)
+
+    def capture_screen(self) -> str:
+        """Takes a full screenshot of the primary monitor."""
+        logging.info("[VisualState] Capturing desktop state...")
+        try:
+            screenshot = ImageGrab.grab()
+            save_path = os.path.join(self.output_dir, "current_desktop_state.png")
+            screenshot.save(save_path)
+            logging.info(f"[VisualState] Screenshot saved to {save_path}")
+            return save_path
+        except Exception as e:
+            logging.error(f"[VisualState] Failed to capture screen: {e}")
+            return ""
+
+    def find_coordinates(self, target_description: str) -> tuple[int, int]:
+        """
+        Sends the current desktop screenshot to a LOCAL Vision LLM (e.g., Ollama running LLaVA).
+        100% Offline. Zero API Keys.
+        """
+        import base64
+        import json
+        import urllib.request
+        import urllib.error
+        import re
+        
+        logging.info(f"[VisualState] Capturing image and routing to LOCAL Vision API for '{target_description}'...")
+        image_path = self.capture_screen()
+        
+        if not image_path:
+            return (-1, -1)
+            
+        with open(image_path, "rb") as image_file:
+            base64_image = base64.b64encode(image_file.read()).decode('utf-8')
+            
+        # OLLAMA LOCAL API PAYLOAD
+        payload = {
+            "model": "moondream:latest",
+            "prompt": f"You are a computer control agent. Locate the exact center of '{target_description}' in this image. Return ONLY a JSON object with 'x' and 'y' integer coordinates. Example: {{\"x\": 500, \"y\": 500}}",
+            "images": [base64_image],
+            "stream": False,
+            "format": "json"
+        }
+        
+        try:
+            req = urllib.request.Request(
+                "http://localhost:11434/api/generate",
+                data=json.dumps(payload).encode('utf-8'),
+                headers={'Content-Type': 'application/json'}
+            )
+            
+            try:
+                with urllib.request.urlopen(req, timeout=30) as response:
+                    result = json.loads(response.read().decode('utf-8'))
+                    response_text = result.get("response", "{}")
+                    
+                    # Extract JSON from response
+                    match = re.search(r'\{.*\}', response_text, re.DOTALL)
+                    if match:
+                        coords = json.loads(match.group(0))
+                        logging.info(f"[VisualState] Local Model located target: {coords}")
+                        return (coords.get("x", -1), coords.get("y", -1))
+            except urllib.error.URLError:
+                logging.error("[VisualState] Ollama server not detected at localhost:11434. Ensure Ollama is running.")
+                return (-1, -1)
+                
+            return (-1, -1)
+        except Exception as e:
+            logging.error(f"[VisualState] Local Vision parsing failed: {e}")
+            return (-1, -1)
+
+visual_state = VisualStateParser(r"c:\jarvis AI\jarvis\.jarvis_vision")
