@@ -12,13 +12,13 @@ class PlaywrightBrowserDriver:
         self.browser = None
         self.page = None
 
-    async def launch_browser(self):
+    async def launch_browser(self, headless: bool = False):
         if async_playwright is None:
             print("[BROWSER] Playwright is not installed.")
             return None
         if not self.browser:
             self.playwright = await async_playwright().start()
-            self.browser = await self.playwright.chromium.launch(headless=False)
+            self.browser = await self.playwright.chromium.launch(headless=headless)
             self.page = await self.browser.new_page()
             print("[BROWSER] Playwright Chromium launched.")
         return self.page

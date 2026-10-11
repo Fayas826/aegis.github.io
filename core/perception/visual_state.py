@@ -28,6 +28,7 @@ class ScreenFrame:
     width: int = 1920
     height: int = 1080
     active_window: str = "Desktop"
+    active_process: str = "none"
     browser_context: Optional[Dict[str, Any]] = None
     timestamp: float = field(default_factory=time.time)
     semantic_context: str = ""

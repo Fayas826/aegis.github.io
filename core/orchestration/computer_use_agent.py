@@ -49,6 +49,7 @@ class ComputerUseAgent:
         self.agent_state = "STANDBY"
         self.confidence_score = 100
         self.max_retries = 3
+        self.target_application = None
 
     async def execute_task(self, task_description: str) -> Dict[str, Any]:
         """Runs the pipeline execution loop with failure recovery."""
@@ -124,6 +125,9 @@ class ComputerUseAgent:
                 raise SwarmHandoff("vision", task_description, {"source": "computer_use"})
 
 
+        self.target_application = None
+        is_final_step = False
+
         while self.is_running and self.current_step < self.max_steps:
             self.current_step += 1
             print(f"[COMPUTER_USE] Cycle Step {self.current_step}/{self.max_steps}")
@@ -190,6 +194,11 @@ class ComputerUseAgent:
             target = plan_res.get("target") or "Screen target"
             text_payload = plan_res.get("text_payload")
             is_final_step = plan_res.get("finished", False)
+            target_app = plan_res.get("target_app")
+            if target_app:
+                self.target_application = target_app
+            elif action_type in ("OPEN_APP", "LAUNCH_APP", "OPEN_APPLICATION"):
+                self.target_application = target
             
             if not action_type or action_type == "WAIT" and is_final_step:
                 print("[COMPUTER_USE] Loop terminated: Completed flag resolved or empty action.")
@@ -209,6 +218,48 @@ class ComputerUseAgent:
             requires_coords = action_type in ["CLICK", "DOUBLE_CLICK", "RIGHT_CLICK", "MOVE"] or (
                 action_type == "TYPE" and not is_active_win_target
             )
+
+            # Focus safety check: prevent keystroke leakage to empty desktop or wrong application window
+            if action_type in ("TYPE", "HOTKEY", "PRESS"):
+                active_win = (getattr(before_frame, 'active_window', '') or '').strip().lower()
+                active_proc = (getattr(before_frame, 'active_process', '') or '').strip().lower()
+
+                # 1. Check if desktop is completely unfocused / locked / empty
+                if is_active_win_target and (not active_win or active_win in ('desktop', 'program manager', 'none', '')):
+                    print(f"[COMPUTER_USE] Safety Check FAILED: Attempted to {action_type} into Active Window, but no application window has focus (active='{active_win}').")
+                    self.agent_state = "REPLANNING"
+                    state_machine.transition_to("REPLANNING", task_description, "No foreground window focused for input")
+                    self.is_running = False
+                    return {"status": "FAILED", "reason": f"FOCUS_ERROR: No foreground application has focus to receive text (active='{active_win}')."}
+
+                # 2. Check if a target application was specified and verify foreground focus
+                if getattr(self, "target_application", None) and is_active_win_target:
+                    target_app_lower = self.target_application.lower().strip()
+                    if target_app_lower not in active_win and target_app_lower not in active_proc:
+                        # Attempt to bring the target application to the foreground
+                        try:
+                            from core.execution.universal_desktop_controller import universal_controller
+                            print(f"[COMPUTER_USE] Target '{self.target_application}' not in foreground (active='{active_win}'). Attempting focus takeover...")
+                            focused_hwnd = universal_controller.focus_application(self.target_application, minimize_others=False)
+                            if focused_hwnd:
+                                await asyncio.sleep(0.5)
+                                ref_frame = await screen_capturer.capture_frame_async()
+                                before_frame = ref_frame
+                                active_win = (getattr(before_frame, 'active_window', '') or '').strip().lower()
+                                active_proc = (getattr(before_frame, 'active_process', '') or '').strip().lower()
+                        except Exception as e_foc:
+                            print(f"[COMPUTER_USE] Focus acquisition error: {e_foc}")
+
+                        if target_app_lower not in active_win and target_app_lower not in active_proc:
+                            print(f"[COMPUTER_USE] Safety Check FAILED: Focus mismatch! Expected target '{self.target_application}', but foreground window is '{active_win}' (proc: '{active_proc}'). Keystroke leakage suppressed.")
+                            self.agent_state = "REPLANNING"
+                            state_machine.transition_to("REPLANNING", task_description, f"Focus mismatch: expected {self.target_application}, found {active_win}")
+                            self.is_running = False
+                            return {
+                                "status": "FAILED",
+                                "reason": f"FOCUS_MISMATCH: Foreground window '{active_win}' does not match target application '{self.target_application}'. Keystroke leakage suppressed."
+                            }
+
             if (self.confidence_score < 70 or not mapped_coords) and requires_coords:
                 print(f"[COMPUTER_USE] Traditional grounding confidence ({self.confidence_score}%). Engaging OmniParser v2 Set-of-Marks Visual Grounding...")
                 try:
@@ -402,15 +453,20 @@ class ComputerUseAgent:
         self.agent_state = "STANDBY"
         self.is_running = False
         # Running out of steps is not the same as succeeding. Report honestly:
-        # SUCCESS only when at least one step actually verified.
-        succeeded = any(
-            isinstance(s, dict) and s.get("success") for s in self.step_history
+        # Task succeeds only if at least one step was executed, all executed steps succeeded,
+        # and the final step was reached and verified.
+        last_step = self.step_history[-1] if self.step_history else None
+        succeeded = (
+            bool(last_step)
+            and last_step.get("success", False)
+            and all(isinstance(s, dict) and s.get("success") for s in self.step_history)
+            and is_final_step
         )
         if succeeded:
             return {"status": "SUCCESS", "history": self.step_history}
         return {
             "status": "FAILED",
-            "reason": "No step completed successfully within the step budget.",
+            "reason": "Task did not complete all required verified steps.",
             "steps_attempted": len(self.step_history),
             "history": self.step_history,
         }

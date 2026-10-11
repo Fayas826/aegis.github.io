@@ -175,6 +175,7 @@ class PlannerPipeline:
                     return {
                         "action_type": "OPEN_APP",
                         "target": app,
+                        "target_app": app,
                         "text_payload": None,
                         "reasoning": f"Step 1: Opening '{app}' for multi-step workflow.",
                         "finished": False
@@ -188,6 +189,7 @@ class PlannerPipeline:
                             return {
                                 "action_type": "TYPE",
                                 "target": "Active Window",
+                                "target_app": app,
                                 "text_payload": text_to_type,
                                 "reasoning": f"Step 2: Typing text '{text_to_type}' into active {app}.",
                                 "finished": not has_save
@@ -200,6 +202,7 @@ class PlannerPipeline:
                             return {
                                 "action_type": "HOTKEY",
                                 "target": "ctrl+s",
+                                "target_app": app,
                                 "text_payload": "ctrl+s",
                                 "reasoning": "Step 3: Triggering save dialog via Ctrl+S shortcut.",
                                 "finished": not bool(filename)
@@ -213,6 +216,7 @@ class PlannerPipeline:
                                 return {
                                     "action_type": "TYPE",
                                     "target": "Active Window",
+                                    "target_app": app,
                                     "text_payload": f"{filename}\n",
                                     "reasoning": f"Step 4: Submitting save filename '{filename}'.",
                                     "finished": True

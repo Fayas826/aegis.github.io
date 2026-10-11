@@ -241,6 +241,31 @@ class TestPhase3MultiAgentReliability(unittest.TestCase):
         self.assertEqual(restored.session_id, "browser_session_001")
         self.assertEqual(restored.parameters["city"], "Kochi")
 
+        # Genuine Browser Session Reuse across agents
+        from core.perception.browser_driver import PlaywrightBrowserDriver
+        loop = asyncio.new_event_loop()
+        async def verify_cross_agent_session():
+            driver = PlaywrightBrowserDriver()
+            try:
+                page1 = await driver.launch_browser(headless=True)
+                if page1 is None:
+                    return True
+                # Agent 1 loads a controlled page and populates session state
+                await page1.set_content("<html><body><input id='session_state' value='step_1_active'/></body></html>")
+
+                # Agent 2 accesses the active browser session without relaunching
+                page2 = await driver.launch_browser(headless=True)
+                self.assertIs(page1, page2)
+                val = await page2.input_value("#session_state")
+                self.assertEqual(val, "step_1_active")
+                return True
+            finally:
+                await driver.close()
+
+        success = loop.run_until_complete(verify_cross_agent_session())
+        self.assertTrue(success)
+        loop.close()
+
     # 9. Structured error propagation
     def test_structured_error_propagation(self):
         failing_agent = MockAgent("failing", return_value={"status": "FAILED", "reason": "GPU VRAM allocation failed"})

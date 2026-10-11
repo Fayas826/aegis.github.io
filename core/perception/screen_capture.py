@@ -1,3 +1,19 @@
+import sys
+import ctypes
+
+# Windows Station Attachment MUST happen before any GDI, COM, or PIL initialization
+if sys.platform == "win32":
+    try:
+        user32 = ctypes.windll.user32
+        h_winsta = user32.OpenWindowStationW("WinSta0", False, 0x037F)
+        if h_winsta:
+            user32.SetProcessWindowStation(h_winsta)
+        h_desk = user32.OpenDesktopW("Default", 0, False, 0x01FF)
+        if h_desk:
+            user32.SetThreadDesktop(h_desk)
+    except Exception:
+        pass
+
 import os
 import base64
 import time
@@ -25,27 +41,69 @@ class ScreenCapturer:
         if pyautogui is None:
             raise RuntimeError("PyAutoGUI driver missing.")
             
-        # 1. Capture screen image (attach thread to active default desktop if inside a custom station/agent desktop session)
+        # 1. Capture screen image (attach thread to active default desktop and WinSta0)
         try:
             import ctypes
-            h_desk = ctypes.windll.user32.OpenDesktopW('Default', 0, False, 0x01ff)
+            user32 = ctypes.windll.user32
+            h_winsta = user32.OpenWindowStationW("WinSta0", False, 0x037F)
+            if h_winsta:
+                user32.SetProcessWindowStation(h_winsta)
+            h_desk = user32.OpenDesktopW("Default", 0, False, 0x01FF)
             if h_desk:
-                ctypes.windll.user32.SetThreadDesktop(h_desk)
+                user32.SetThreadDesktop(h_desk)
         except Exception as desk_e:
             print(f"[SCREEN_CAPTURE] Warning: Failed to attach thread to Default desktop: {desk_e}")
 
-        screenshot = pyautogui.screenshot()
+        # Try MSS first (fastest and immune to GDI lock issues), fallback to PIL/pyautogui
+        screenshot = None
+        try:
+            import mss
+            with mss.mss() as sct:
+                monitor = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
+                sct_img = sct.grab(monitor)
+                screenshot = Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
+        except Exception:
+            try:
+                screenshot = pyautogui.screenshot()
+            except Exception:
+                from PIL import ImageGrab
+                screenshot = ImageGrab.grab()
+
         width, height = screenshot.size
         
-        # Scale for transfer compression
+        # Fast JPEG encoding for 10x lower latency and smaller transfer payload
         buffered = BytesIO()
-        screenshot.save(buffered, format="PNG")
+        if screenshot.mode in ("RGBA", "P"):
+            screenshot = screenshot.convert("RGB")
+        screenshot.save(buffered, format="JPEG", quality=80)
         img_bytes = buffered.getvalue()
         img_b64 = base64.b64encode(img_bytes).decode("utf-8")
         
-        # 2. Identify active window name
+        # 2. Identify active window name and process
         active_window_title = "Desktop"
-        if gw is not None:
+        active_process_name = "none"
+        if sys.platform == "win32":
+            try:
+                hwnd = user32.GetForegroundWindow()
+                if hwnd:
+                    length = user32.GetWindowTextLengthW(hwnd)
+                    if length > 0:
+                        buff = ctypes.create_unicode_buffer(length + 1)
+                        user32.GetWindowTextW(hwnd, buff, length + 1)
+                        if buff.value.strip():
+                            active_window_title = buff.value.strip()
+                    try:
+                        import ctypes.wintypes
+                        import psutil
+                        pid = ctypes.wintypes.DWORD()
+                        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                        if pid.value > 0:
+                            active_process_name = psutil.Process(pid.value).name().lower()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        elif gw is not None:
             try:
                 active_win = gw.getActiveWindow()
                 if active_win and active_win.title:
@@ -60,7 +118,8 @@ class ScreenCapturer:
             image_b64=img_b64,
             width=width,
             height=height,
-            active_window=active_window_title
+            active_window=active_window_title,
+            active_process=active_process_name
         )
 
     async def capture_frame_async(self) -> ScreenFrame:

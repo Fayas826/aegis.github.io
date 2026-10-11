@@ -308,26 +308,18 @@ class DesktopController:
         try:
             if resolved.endswith(":") or os.path.exists(resolved):
                 os.startfile(resolved)
+            elif sys.platform == "win32":
+                # Universal Windows Shell invocation: handles Win32, UWP apps, execution aliases, and protocol verbs
+                subprocess.Popen(["cmd.exe", "/c", "start", "", resolved], shell=True)
             else:
                 clean_name = app_name.strip().lower()
                 exe_path = shutil.which(resolved) or (
                     shutil.which(clean_name) if not resolved.lower().endswith(".exe") else None
                 )
                 if exe_path:
-                    if sys.platform == "win32":
-                        try:
-                            os.startfile(exe_path)
-                        except Exception:
-                            subprocess.Popen([exe_path])
-                    else:
-                        subprocess.Popen([exe_path])
+                    subprocess.Popen([exe_path])
                 else:
-                    # Universal Windows Shell fallback: handles UWP apps, AppX, protocols, and system verbs
-                    try:
-                        subprocess.Popen(["cmd.exe", "/c", "start", "", resolved], shell=True)
-                    except Exception as shell_err:
-                        print(f"[DESKTOP_DOMINANCE] Could not resolve installed path for '{app_name}': {shell_err}")
-                        return {"status": "ERROR", "error": f"Could not resolve application '{app_name}' to an installable program: {shell_err}"}
+                    return {"status": "ERROR", "error": f"Could not find executable for '{app_name}'"}
         except Exception as e2:
             return {"status": "ERROR", "error": f"Could not launch {app_name}: {e2}"}
 
@@ -349,6 +341,8 @@ class DesktopController:
             if target_hwnd:
                 universal_controller.force_foreground_window(target_hwnd, minimize_current_fg=False)
                 return {"status": "SUCCESS", "detail": f"Launched and brought to foreground: {app_name} (HWND {target_hwnd})"}
+            else:
+                return {"status": "ERROR", "error": f"Failed to acquire window for '{app_name}' after launch (desktop may be locked, asleep, or window hidden)."}
 
         return {"status": "SUCCESS", "detail": f"Universally launched {app_name} via {resolved}"}
 
