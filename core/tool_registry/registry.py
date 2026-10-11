@@ -334,6 +334,151 @@ class ToolRegistry:
                 capability="verification",
             ))
 
+            # Phase 3.2: Semantic Windows UI Automation Tools
+            from core.execution.semantic_ui_controller import semantic_ui_controller
+            from core.execution.adaptive_execution_router import adaptive_execution_router
+
+            class InspectWindowSchema(BaseModel):
+                target: str = Field(..., description="Target HWND or window title substring")
+
+            self.register(ToolDefinition(
+                tool_id="desktop.inspect_window",
+                description="Inspect window metadata, title, class, and bounds",
+                input_schema=InspectWindowSchema,
+                handler=lambda target: semantic_ui_controller.inspect_window(int(target) if str(target).isdigit() else target),
+                risk_level="SAFE",
+                timeout_seconds=10,
+                capability="desktop",
+            ))
+
+            class GetUITreeSchema(BaseModel):
+                target: str = Field(..., description="Target HWND or window title substring")
+                max_depth: int = Field(3, description="Maximum tree traversal depth")
+                max_elements: int = Field(50, description="Maximum elements to retrieve")
+
+            self.register(ToolDefinition(
+                tool_id="desktop.get_ui_tree",
+                description="Retrieve structured UI Automation element tree of window",
+                input_schema=GetUITreeSchema,
+                handler=lambda target, max_depth=3, max_elements=50: semantic_ui_controller.get_ui_tree(
+                    int(target) if str(target).isdigit() else target, max_depth=max_depth, max_elements=max_elements
+                ),
+                risk_level="SAFE",
+                timeout_seconds=15,
+                capability="desktop",
+            ))
+
+            class FindUIElementSchema(BaseModel):
+                target: str = Field(..., description="Target HWND or window title substring")
+                automation_id: Optional[str] = Field(None, description="AutomationId of element")
+                name: Optional[str] = Field(None, description="Name/Label of element")
+                control_type: Optional[str] = Field(None, description="ControlType (e.g. ButtonControl, EditControl)")
+
+            self.register(ToolDefinition(
+                tool_id="desktop.find_ui_element",
+                description="Locate element matching criteria inside window",
+                input_schema=FindUIElementSchema,
+                handler=lambda target, automation_id=None, name=None, control_type=None: semantic_ui_controller.find_ui_element(
+                    int(target) if str(target).isdigit() else target,
+                    {"automation_id": automation_id, "name": name, "control_type": control_type}
+                ),
+                risk_level="SAFE",
+                timeout_seconds=10,
+                capability="desktop",
+            ))
+
+            class InvokeUIElementSchema(BaseModel):
+                target: str = Field(..., description="Target HWND or window title substring")
+                automation_id: Optional[str] = Field(None, description="AutomationId to invoke")
+                name: Optional[str] = Field(None, description="Name/Label to invoke")
+                control_type: Optional[str] = Field("ButtonControl", description="ControlType")
+
+            self.register(ToolDefinition(
+                tool_id="desktop.invoke_ui_element",
+                description="Invoke button or control via UIA pattern or click",
+                input_schema=InvokeUIElementSchema,
+                handler=lambda target, automation_id=None, name=None, control_type="ButtonControl": semantic_ui_controller.invoke_ui_element(
+                    int(target) if str(target).isdigit() else target,
+                    {"automation_id": automation_id, "name": name, "control_type": control_type}
+                ),
+                risk_level="MODERATE",
+                timeout_seconds=10,
+                capability="desktop",
+            ))
+
+            class ReadUIElementSchema(BaseModel):
+                target: str = Field(..., description="Target HWND or window title substring")
+                automation_id: Optional[str] = Field(None, description="AutomationId to read")
+                name: Optional[str] = Field(None, description="Name/Label to read")
+                control_type: Optional[str] = Field(None, description="ControlType")
+
+            self.register(ToolDefinition(
+                tool_id="desktop.read_ui_element",
+                description="Read value or text from UI element",
+                input_schema=ReadUIElementSchema,
+                handler=lambda target, automation_id=None, name=None, control_type=None: semantic_ui_controller.read_ui_element(
+                    int(target) if str(target).isdigit() else target,
+                    {"automation_id": automation_id, "name": name, "control_type": control_type}
+                ),
+                risk_level="SAFE",
+                timeout_seconds=10,
+                capability="desktop",
+            ))
+
+            class SetUIValueSchema(BaseModel):
+                target: str = Field(..., description="Target HWND or window title substring")
+                value: str = Field(..., description="Text value to enter")
+                automation_id: Optional[str] = Field(None, description="AutomationId of edit control")
+                name: Optional[str] = Field(None, description="Name of edit control")
+
+            self.register(ToolDefinition(
+                tool_id="desktop.set_ui_value",
+                description="Set text value into editable control via UIA ValuePattern",
+                input_schema=SetUIValueSchema,
+                handler=lambda target, value, automation_id=None, name=None: semantic_ui_controller.set_ui_value(
+                    int(target) if str(target).isdigit() else target,
+                    {"automation_id": automation_id, "name": name},
+                    value=value
+                ),
+                risk_level="MODERATE",
+                timeout_seconds=10,
+                capability="desktop",
+            ))
+
+            class SelectUIItemSchema(BaseModel):
+                target: str = Field(..., description="Target HWND or window title substring")
+                name: Optional[str] = Field(None, description="Name of item to select")
+                automation_id: Optional[str] = Field(None, description="AutomationId of item")
+
+            self.register(ToolDefinition(
+                tool_id="desktop.select_ui_item",
+                description="Select item in list or tree via UIA SelectionItemPattern",
+                input_schema=SelectUIItemSchema,
+                handler=lambda target, name=None, automation_id=None: semantic_ui_controller.select_ui_item(
+                    int(target) if str(target).isdigit() else target,
+                    {"name": name, "automation_id": automation_id}
+                ),
+                risk_level="MODERATE",
+                timeout_seconds=10,
+                capability="desktop",
+            ))
+
+            class AdaptiveExecuteSchema(BaseModel):
+                task_description: str = Field(..., description="Task intent description")
+                target_app: str = Field(..., description="Application name or executable or URL")
+                action: str = Field("invoke", description="Action to perform (invoke, read, set_value, select, run)")
+                params: Dict[str, Any] = Field(default_factory=dict, description="Action parameters")
+
+            self.register(ToolDefinition(
+                tool_id="desktop.adaptive_execute",
+                description="Adaptively routes action across Native API, Semantic UIA, Visual, or Browser",
+                input_schema=AdaptiveExecuteSchema,
+                handler=adaptive_execution_router.execute_adaptively,
+                risk_level="MODERATE",
+                timeout_seconds=30,
+                capability="orchestration",
+            ))
+
         except Exception:
             pass
 

@@ -1,3 +1,4 @@
+import os
 """
 A.E.G.I.S. Universal Desktop Controller
 =======================================
@@ -21,16 +22,46 @@ class UniversalDesktopController:
     def __init__(self):
         self.user32 = ctypes.windll.user32
         self.kernel32 = ctypes.windll.kernel32
+        self._init_ctypes_signatures()
+
+    def _init_ctypes_signatures(self):
+        """Configure explicit 64-bit function signatures to prevent pointer/handle truncation."""
+        try:
+            import ctypes.wintypes as wintypes
+            self.wintypes = wintypes
+
+            self.user32.GetForegroundWindow.restype = wintypes.HWND
+            self.user32.GetForegroundWindow.argtypes = []
+            self.user32.IsWindowVisible.argtypes = [wintypes.HWND]
+            self.user32.IsWindowVisible.restype = wintypes.BOOL
+            self.user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+            self.user32.GetWindowTextLengthW.restype = ctypes.c_int
+            self.user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+            self.user32.GetWindowTextW.restype = ctypes.c_int
+            self.user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+            self.user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+            self.user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+            self.user32.SetForegroundWindow.restype = wintypes.BOOL
+            self.user32.BringWindowToTop.argtypes = [wintypes.HWND]
+            self.user32.BringWindowToTop.restype = wintypes.BOOL
+            self.user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+            self.user32.ShowWindow.restype = wintypes.BOOL
+            self.user32.AttachThreadInput.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.BOOL]
+            self.user32.AttachThreadInput.restype = wintypes.BOOL
+        except Exception as e:
+            logger.warning(f"Failed setting ctypes signatures: {e}")
 
     def attach_to_interactive_station(self) -> bool:
-        """Attach process and thread to Windows WinSta0\\Default desktop session."""
+        """Attach thread to Windows WinSta0\\Default desktop session if running in background thread."""
         try:
-            h_winsta = self.user32.OpenWindowStationW("WinSta0", False, 0x037F)
-            if h_winsta:
-                self.user32.SetProcessWindowStation(h_winsta)
+            # Check if GetForegroundWindow is already functional
+            fg = self.user32.GetForegroundWindow()
+            if fg:
+                return True
             h_desk = self.user32.OpenDesktopW("Default", 0, False, 0x01FF)
             if h_desk:
                 self.user32.SetThreadDesktop(h_desk)
+                self.user32.CloseDesktop(h_desk)
             return True
         except Exception as e:
             logger.warning(f"Interactive station attachment exception: {e}")
@@ -53,53 +84,71 @@ class UniversalDesktopController:
 
     def list_visible_windows(self) -> List[Tuple[int, str]]:
         """List all top-level visible application windows on the interactive desktop."""
-        self.attach_to_interactive_station()
-        windows = []
-        def enum_cb(hwnd, _):
-            if self.user32.IsWindowVisible(hwnd):
-                length = self.user32.GetWindowTextLengthW(hwnd)
-                if length > 0:
-                    buff = ctypes.create_unicode_buffer(length + 1)
-                    self.user32.GetWindowTextW(hwnd, buff, length + 1)
-                    if buff.value.strip():
-                        windows.append((hwnd, buff.value))
-            return True
+        try:
+            import win32gui
+            windows = []
+            def enum_cb(hwnd, extra):
+                if win32gui.IsWindowVisible(hwnd):
+                    text = win32gui.GetWindowText(hwnd)
+                    if text and text.strip():
+                        extra.append((hwnd, text.strip()))
+            win32gui.EnumWindows(enum_cb, windows)
+            return windows
+        except Exception:
+            self.attach_to_interactive_station()
+            windows = []
+            def enum_cb(hwnd, _):
+                if self.user32.IsWindowVisible(hwnd):
+                    length = self.user32.GetWindowTextLengthW(hwnd)
+                    if length > 0:
+                        buff = ctypes.create_unicode_buffer(length + 1)
+                        self.user32.GetWindowTextW(hwnd, buff, length + 1)
+                        if buff.value.strip():
+                            windows.append((hwnd, buff.value))
+                return True
 
-        import ctypes.wintypes
-        cb = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM)(enum_cb)
-        self.user32.EnumWindows(cb, 0)
-        return windows
+            import ctypes.wintypes as wintypes
+            cb = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)(enum_cb)
+            self.user32.EnumWindows(cb, 0)
+            return windows
 
-    def force_foreground_window(self, target_hwnd: int, minimize_current_fg: bool = True) -> bool:
+    def force_foreground_window(self, target_hwnd: int, minimize_current_fg: bool = False) -> bool:
         """
         Forcibly brings target_hwnd to the absolute top foreground.
         Uses thread input attachment, Alt-key pulse, and SwitchToThisWindow to defeat UIPI locks.
         """
-        self.attach_to_interactive_station()
         self.bypass_foreground_lock()
 
         current_fg = self.user32.GetForegroundWindow()
+        if current_fg == target_hwnd:
+            return True
+
         current_thread = self.kernel32.GetCurrentThreadId()
-        fg_thread = self.user32.GetWindowThreadProcessId(current_fg, None) if current_fg else 0
-        target_thread = self.user32.GetWindowThreadProcessId(target_hwnd, None)
+        import ctypes.wintypes as wintypes
+        fg_pid = wintypes.DWORD()
+        fg_thread = self.user32.GetWindowThreadProcessId(current_fg, ctypes.byref(fg_pid)) if current_fg else 0
+        tgt_pid = wintypes.DWORD()
+        target_thread = self.user32.GetWindowThreadProcessId(target_hwnd, ctypes.byref(tgt_pid))
 
         # Pulse Alt (VK_MENU = 0x12) to grant foreground rights in Windows kernel
         self.user32.keybd_event(0x12, 0, 0, 0)
         self.user32.keybd_event(0x12, 0, 2, 0)
 
         # Attach thread inputs
+        attached_fg = False
+        attached_tgt = False
         if fg_thread and fg_thread != current_thread:
-            self.user32.AttachThreadInput(current_thread, fg_thread, True)
+            attached_fg = bool(self.user32.AttachThreadInput(current_thread, fg_thread, True))
         if target_thread and target_thread != current_thread:
-            self.user32.AttachThreadInput(current_thread, target_thread, True)
+            attached_tgt = bool(self.user32.AttachThreadInput(current_thread, target_thread, True))
 
         try:
             if minimize_current_fg and current_fg and current_fg != target_hwnd:
                 self.user32.ShowWindow(current_fg, 6)  # SW_MINIMIZE = 6
-                time.sleep(0.3)
+                time.sleep(0.2)
 
-            # Maximize target and bring to front
-            self.user32.ShowWindow(target_hwnd, 3)  # SW_SHOWMAXIMIZED = 3
+            # Restore target if minimized, then show
+            self.user32.ShowWindow(target_hwnd, 9)  # SW_RESTORE = 9
             self.user32.BringWindowToTop(target_hwnd)
 
             try:
@@ -109,13 +158,14 @@ class UniversalDesktopController:
 
             self.user32.SetForegroundWindow(target_hwnd)
         finally:
-            if fg_thread and fg_thread != current_thread:
+            if attached_fg:
                 self.user32.AttachThreadInput(current_thread, fg_thread, False)
-            if target_thread and target_thread != current_thread:
+            if attached_tgt:
                 self.user32.AttachThreadInput(current_thread, target_thread, False)
 
-        time.sleep(0.5)
-        return self.user32.GetForegroundWindow() == target_hwnd
+        time.sleep(0.4)
+        fg_now = self.user32.GetForegroundWindow()
+        return fg_now == target_hwnd
 
     def focus_application(self, app_title_substring: str, minimize_others: bool = True) -> Optional[int]:
         """Finds and brings an application window matching substring to the foreground."""
@@ -166,9 +216,11 @@ class UniversalDesktopController:
     def safe_type_into_window(self, app_title_substring: str, text: str):
         """Focuses the target window and injects text via safe typing or clipboard paste."""
         hwnd = self.focus_application(app_title_substring, minimize_others=False)
+        if not hwnd:
+            logger.warning("Could not find or focus window matching '%s'", app_title_substring)
+            return False
         time.sleep(0.5)
         try:
-            import pyperclip
             pyperclip.copy(text)
             pyautogui.hotkey('ctrl', 'v')
             time.sleep(0.1)
@@ -178,6 +230,21 @@ class UniversalDesktopController:
                 pyautogui.write(text, interval=0.02)
                 pyautogui.press('enter')
         return True
+
+    def take_screenshot_safely(self, output_path: str) -> bool:
+        """Captures a screenshot safely and saves it to output_path."""
+        import base64
+        from core.perception.screen_capture import screen_capturer
+        try:
+            frame = screen_capturer.capture_frame()
+            if frame and frame.image_b64:
+                os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+                with open(output_path, "wb") as f_img:
+                    f_img.write(base64.b64decode(frame.image_b64))
+                return True
+        except Exception as e:
+            logger.warning("Could not take screenshot safely: %s", e)
+        return False
 
 desktop_controller = UniversalDesktopController()
 universal_controller = desktop_controller

@@ -7,30 +7,37 @@ import ctypes
 import winreg
 import glob
 import shutil
-from typing import Dict, Any, Optional
+from typing import List, Dict, Optional
 
 # Windows Proactor EventLoop shutdown cleanup patch (eliminates 'Event loop is closed' on exit)
 if sys.platform == "win32":
     try:
         from asyncio.base_subprocess import BaseSubprocessTransport
         from asyncio.proactor_events import _ProactorBasePipeTransport
-        BaseSubprocessTransport.__del__ = lambda *args, **kwargs: None
-        _ProactorBasePipeTransport.__del__ = lambda *args, **kwargs: None
+        BaseSubprocessTransport.__del__ = lambda *_, **__: None
+        _ProactorBasePipeTransport.__del__ = lambda *_, **__: None
     except Exception:
         pass
+    try:
+        import win32process
+        import win32gui
+    except ImportError:
+        win32process = None
+        win32gui = None
+
+
+from core.reliability.system_logger import system_logger
 
 try:
     import pyautogui
     pyautogui.FAILSAFE = False
 except Exception as e:
-    from core.reliability.system_logger import system_logger
     system_logger.log('ERROR', 'desktop_controller', f'PyAutoGUI load fail: {e}')
     pyautogui = None
 
 try:
     import pygetwindow as gw
 except Exception as e:
-    from core.reliability.system_logger import system_logger
     system_logger.log('ERROR', 'desktop_controller', f'PyGetWindow load fail: {e}')
     gw = None
 
@@ -46,6 +53,9 @@ class DesktopController:
             self.pyautogui.FAILSAFE = False
         self.coord_mapper = CoordinateMapper()
         self.user32 = ctypes.windll.user32
+        self._spawned_pids = set()
+        self._last_spawned_pid = None
+        self._last_acquired_hwnd = None
         
         # Standard fallback protocol aliases
         self.protocol_aliases = {
@@ -158,6 +168,8 @@ class DesktopController:
 
         # 3. Direct executable name fallback (only for valid single-token app names)
         if " " not in clean_name and not any(w in clean_name for w in ["and", "go", "to", "open", "search"]):
+            if clean_name.endswith(".exe"):
+                return clean_name
             return f"{clean_name}.exe"
         return None
 
@@ -203,23 +215,19 @@ class DesktopController:
                 clean_target = clean_target[len(pfx):].strip()
 
         # Check for ticketing portals or commands
-        if any(portal in clean_target for portal in ["bookmyshow", "fandango", "ticketmaster", "eventbrite", "amc", "tickets", "seat"]):
+        is_portal = any(portal in clean_target for portal in ["bookmyshow", "fandango", "ticketmaster", "eventbrite", "amc", "tickets", "seat"])
+        m_goto = re.search(r"^(?:chrome|browser|edge)\s+(?:and\s+)?(?:go\s+to|goto|open|navigate\s+to)\s+(.+)", clean_target)
+        if is_portal or (m_goto and any(p in m_goto.group(1).strip() for p in ["bookmyshow", "fandango", "ticketmaster", "amc", "ticket"])):
             try:
                 from core.ticket_booking_agent import jarvis_ticket_booker
-                res = await jarvis_ticket_booker.book_from_command(app_name)
+                cmd_target = m_goto.group(1).strip() if (m_goto and not is_portal) else app_name
+                res = await jarvis_ticket_booker.book_from_command(cmd_target)
                 return {"status": "SUCCESS", "detail": res}
             except Exception as e:
                 print(f"[DESKTOP_DOMINANCE] Error delegating to ticket booker: {e}")
 
-        # Check for compound "open <browser> and go to <site>"
-        m_goto = re.search(r"^(?:chrome|browser|edge)\s+(?:and\s+)?(?:go\s+to|goto|open|navigate\s+to)\s+(.+)", clean_target)
         if m_goto:
-            dest = m_goto.group(1).strip()
-            if any(p in dest for p in ["bookmyshow", "fandango", "ticketmaster", "amc", "ticket"]):
-                from core.ticket_booking_agent import jarvis_ticket_booker
-                res = await jarvis_ticket_booker.book_from_command(dest)
-                return {"status": "SUCCESS", "detail": res}
-            clean_target = dest
+            clean_target = m_goto.group(1).strip()
 
         # 0. Universal Web Search queries: "search <query> on <engine>" or "search <query>"
         m_search = re.search(r"^(?:search|find|google|look up)\s+(?:for\s+)?(.+)", clean_target)
@@ -297,54 +305,156 @@ class DesktopController:
                 universal_controller.focus_application("chrome", minimize_others=False)
             return {"status": "SUCCESS", "detail": f"Navigated browser to: {target_url}"}
 
+        # 1. Desktop Session Pre-Flight Check (Windows)
+        if sys.platform == "win32":
+            universal_controller.attach_to_interactive_station()
+            h_desk = None
+            try:
+                h_desk = self.user32.OpenInputDesktop(0, False, 0x01FF)
+                if not h_desk:
+                    return {
+                        "status": "BLOCKED",
+                        "error": "DESKTOP_SESSION_UNAVAILABLE",
+                        "reason": "Windows desktop session is locked, asleep, or unavailable."
+                    }
+            finally:
+                if h_desk:
+                    self.user32.CloseDesktop(h_desk)
+
+        app_args = ""
         resolved = self.resolve_application_path(app_name)
+        if not resolved and " " in app_name:
+            parts = app_name.split(" ", 1)
+            candidate_app = parts[0]
+            resolved = self.resolve_application_path(candidate_app)
+            if resolved:
+                app_args = parts[1].strip()
+
         if not resolved:
             return {"status": "ERROR", "error": f"Could not find application '{app_name}' on system."}
-        print(f"[DESKTOP_DOMINANCE] Launching '{app_name}' resolved to: '{resolved}'")
+        print(f"[DESKTOP_DOMINANCE] Launching '{app_name}' resolved to: '{resolved}' (args: '{app_args}')")
         
-        # Keep current foreground intact; new window will gain focus naturally upon launch
-
-
+        spawned_pid = None
         try:
-            if resolved.endswith(":") or os.path.exists(resolved):
+            if resolved.endswith(":"):
                 os.startfile(resolved)
             elif sys.platform == "win32":
-                # Universal Windows Shell invocation: handles Win32, UWP apps, execution aliases, and protocol verbs
-                subprocess.Popen(["cmd.exe", "/c", "start", "", resolved], shell=True)
+                clean_name = app_name.strip().lower()
+                exe_path = (
+                    resolved if (os.path.isabs(resolved) and os.path.exists(resolved))
+                    else shutil.which(resolved)
+                    or (shutil.which(clean_name) if not resolved.lower().endswith(".exe") else None)
+                )
+                if exe_path and win32process:
+                    try:
+                        si = win32process.STARTUPINFO()
+                        si.lpDesktop = r"WinSta0\Default"
+                        arg_str = f'"{app_args}"' if (" " in app_args and not app_args.startswith('"')) else app_args
+                        cmd_line = f'"{exe_path}" {arg_str}'.strip() if app_args else None
+                        _, _, pid, _ = win32process.CreateProcess(
+                            exe_path, cmd_line, None, None, False, 0, None, None, si
+                        )
+                        spawned_pid = pid
+                    except Exception:
+                        arg_str = f'"{app_args}"' if (" " in app_args and not app_args.startswith('"')) else app_args
+                        cmd = f'"{exe_path}" {arg_str}'.strip() if app_args else exe_path
+                        proc = subprocess.Popen(cmd, shell=True)
+                        spawned_pid = proc.pid
+                elif exe_path:
+                    arg_str = f'"{app_args}"' if (" " in app_args and not app_args.startswith('"')) else app_args
+                    cmd = f'"{exe_path}" {arg_str}'.strip() if app_args else exe_path
+                    proc = subprocess.Popen(cmd, shell=True)
+                    spawned_pid = proc.pid
+                elif os.path.exists(resolved):
+                    os.startfile(resolved)
+                else:
+                    proc = subprocess.Popen(["cmd.exe", "/c", "start", "", resolved], shell=True)
+                    spawned_pid = proc.pid
             else:
                 clean_name = app_name.strip().lower()
                 exe_path = shutil.which(resolved) or (
                     shutil.which(clean_name) if not resolved.lower().endswith(".exe") else None
                 )
                 if exe_path:
-                    subprocess.Popen([exe_path])
+                    proc = subprocess.Popen([exe_path])
+                    spawned_pid = proc.pid
                 else:
                     return {"status": "ERROR", "error": f"Could not find executable for '{app_name}'"}
         except Exception as e2:
             return {"status": "ERROR", "error": f"Could not launch {app_name}: {e2}"}
 
+        if spawned_pid:
+            self._last_spawned_pid = spawned_pid
+            self._spawned_pids.add(spawned_pid)
+
         # 2. Wait up to 5s for the newly opened application window to appear and bring it to top
         if auto_focus:
             target_hwnd = None
+            target_pid = None
             search_terms = [app_name.lower(), resolved.lower().replace(".exe", "").split("\\")[-1]]
-            for _ in range(10):
-                await asyncio.sleep(0.5)
+            if app_args:
+                base_arg = os.path.basename(app_args.strip("\"'")).lower()
+                if base_arg:
+                    search_terms.append(base_arg)
+            for _ in range(15):
+                await asyncio.sleep(0.3)
                 windows = universal_controller.list_visible_windows()
                 for hwnd, title in windows:
                     t_lower = title.lower()
                     if any(term in t_lower for term in search_terms if term):
                         target_hwnd = hwnd
+                        try:
+                            if sys.platform == "win32" and win32process:
+                                _, win_pid = win32process.GetWindowThreadProcessId(hwnd)
+                                target_pid = win_pid
+                                self._spawned_pids.add(win_pid)
+                        except Exception:
+                            pass
                         break
                 if target_hwnd:
                     break
 
             if target_hwnd:
+                self._last_acquired_hwnd = target_hwnd
                 universal_controller.force_foreground_window(target_hwnd, minimize_current_fg=False)
-                return {"status": "SUCCESS", "detail": f"Launched and brought to foreground: {app_name} (HWND {target_hwnd})"}
+                fg_now = win32gui.GetForegroundWindow() if (sys.platform == "win32" and win32gui) else target_hwnd
+                return {
+                    "status": "SUCCESS",
+                    "detail": f"Launched and brought to foreground: {app_name} (HWND {target_hwnd})",
+                    "hwnd": target_hwnd,
+                    "pid": target_pid or spawned_pid,
+                    "foreground_confirmed": (fg_now == target_hwnd)
+                }
             else:
-                return {"status": "ERROR", "error": f"Failed to acquire window for '{app_name}' after launch (desktop may be locked, asleep, or window hidden)."}
+                return {
+                    "status": "ERROR",
+                    "error": f"Failed to acquire window for '{app_name}' after launch (desktop may be locked, asleep, or window hidden).",
+                    "spawned_pid": spawned_pid
+                }
 
-        return {"status": "SUCCESS", "detail": f"Universally launched {app_name} via {resolved}"}
+        return {
+            "status": "SUCCESS",
+            "detail": f"Universally launched {app_name} via {resolved}",
+            "spawned_pid": spawned_pid
+        }
+
+    def cleanup_spawned_processes(self, pids: Optional[List[int]] = None):
+        """Clean up only processes spawned by AEGIS desktop actions without killing arbitrary user processes."""
+        targets = set(pids) if pids else set(self._spawned_pids)
+        for pid in list(targets):
+            if pid and psutil.pid_exists(pid):
+                try:
+                    p = psutil.Process(pid)
+                    for child in p.children(recursive=True):
+                        try:
+                            child.terminate()
+                        except Exception:
+                            pass
+                    p.terminate()
+                    print(f"[DESKTOP_DOMINANCE] Cleaned up spawned process PID {pid}")
+                except Exception as e:
+                    print(f"[DESKTOP_DOMINANCE] Error terminating PID {pid}: {e}")
+            self._spawned_pids.discard(pid)
 
     async def control_window(self, payload: Dict) -> Dict:
         """Universal window control with Foreground Lock Timeout bypass."""
