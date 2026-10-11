@@ -279,7 +279,7 @@ async def query_vlm_fallback(screen: ScreenFrame, instruction: str, elements: Li
             import io
 
             client = genai.Client(api_key=gemini_key)
-            pil_img = PILImage.open(temp_path)
+            pil_img = PILImage.open(io.BytesIO(buffer.tobytes()))
             response = None
             for g_model in ("gemini-flash-lite-latest", "gemini-flash-latest"):
                 try:

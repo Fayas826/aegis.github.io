@@ -205,7 +205,11 @@ class ComputerUseAgent:
             element = ground_res["element"]
 
             # Visual Grounding Fallback: OmniParser v2 Set-of-Marks + VLM
-            if (self.confidence_score < 70 or not mapped_coords) and action_type in ["CLICK", "TYPE", "MOVE"]:
+            is_active_win_target = str(target).strip().lower() in ["active window", "active_window", "system", "screen"]
+            requires_coords = action_type in ["CLICK", "DOUBLE_CLICK", "RIGHT_CLICK", "MOVE"] or (
+                action_type == "TYPE" and not is_active_win_target
+            )
+            if (self.confidence_score < 70 or not mapped_coords) and requires_coords:
                 print(f"[COMPUTER_USE] Traditional grounding confidence ({self.confidence_score}%). Engaging OmniParser v2 Set-of-Marks Visual Grounding...")
                 try:
                     from core.perception.omni_parser import omni_parser
@@ -251,7 +255,7 @@ class ComputerUseAgent:
                 except Exception as e_omni:
                     print(f"[COMPUTER_USE] OmniParser visual grounding fallback note: {e_omni}")
 
-            if (self.confidence_score < 70 or not mapped_coords) and action_type in ["CLICK", "TYPE", "MOVE"]:
+            if (self.confidence_score < 70 or not mapped_coords) and requires_coords:
                 print(f"[COMPUTER_USE] Grounding match confidence too low ({self.confidence_score}%). Aborting step to prevent blind click.")
                 self.agent_state = "REPLANNING"
                 state_machine.transition_to("REPLANNING", task_description, "Grounding match score below threshold")

@@ -13,11 +13,16 @@ PROJECT_MEMORY_DIR = "project_memory"
 _LIFECYCLE_DIR = os.path.join(PROJECT_MEMORY_DIR, "lifecycle")
 
 _VALID_TRANSITIONS = {
-    "PENDING":    {"RUNNING", "CANCELLED"},
-    "RUNNING":    {"COMPLETED", "FAILED", "CANCELLED", "RETRYING"},
+    "CREATED":    {"PLANNING", "RUNNING", "PENDING", "CANCELLED"},
+    "PLANNING":   {"RUNNING", "PENDING", "FAILED", "CANCELLED"},
+    "PENDING":    {"RUNNING", "PLANNING", "CANCELLED"},
+    "RUNNING":    {"VERIFYING", "SUCCEEDED", "COMPLETED", "FAILED", "CANCELLED", "RETRYING", "RECOVERY"},
+    "VERIFYING":  {"SUCCEEDED", "COMPLETED", "FAILED", "RETRYING", "RECOVERY"},
     "RETRYING":   {"RUNNING", "FAILED", "CANCELLED"},
+    "RECOVERY":   {"RUNNING", "FAILED", "CANCELLED"},
+    "SUCCEEDED":  set(),
     "COMPLETED":  set(),
-    "FAILED":     {"RETRYING", "CANCELLED"},
+    "FAILED":     {"RETRYING", "RECOVERY", "CANCELLED"},
     "CANCELLED":  set(),
 }
 
@@ -114,14 +119,31 @@ class TaskStateController:
                 self._persist_session()
                 self._legacy_update({"status": "RUNNING", "active_task_id": node_id})
 
+    def mark_node_verifying(self, node_id: str):
+        with self._lock:
+            if self._record:
+                node = self._record.nodes.setdefault(node_id, {})
+                current = node.get("status", "RUNNING")
+                if not self._is_valid_transition(current, "VERIFYING"):
+                    print(f"[TASK_STATE] Invalid transition {current} → VERIFYING for {node_id}")
+                    return
+                node["status"] = "VERIFYING"
+                node["verifying_at"] = time.time()
+                self._record.updated_at = time.time()
+                self._persist_session()
+
+    def mark_node_succeeded(self, node_id: str, result: Dict[str, Any] = None):
+        return self.mark_node_completed(node_id, result)
+
     def mark_node_completed(self, node_id: str, result: Dict[str, Any] = None):
         with self._lock:
             if self._record:
                 node = self._record.nodes.setdefault(node_id, {})
-                if not self._is_valid_transition(node.get("status", "RUNNING"), "COMPLETED"):
-                    print(f"[TASK_STATE] Invalid transition {node.get('status')} → COMPLETED for {node_id}")
+                current = node.get("status", "RUNNING")
+                if not self._is_valid_transition(current, "COMPLETED") and not self._is_valid_transition(current, "SUCCEEDED"):
+                    print(f"[TASK_STATE] Invalid transition {current} → COMPLETED for {node_id}")
                     return
-                node["status"] = "COMPLETED"
+                node["status"] = "SUCCEEDED"
                 node["completed_at"] = time.time()
                 node["result"] = result or {}
                 if self._record.active_node_id == node_id:
