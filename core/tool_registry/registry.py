@@ -479,8 +479,110 @@ class ToolRegistry:
                 capability="orchestration",
             ))
 
+            # Phase 4: Browser Automation and Ticket Booking Tools
+            from core.perception.browser_driver import browser_driver
+            from core.booking.intent_parser import parse_booking_intent
+            from core.ticket_booking_agent import jarvis_ticket_booker
+
+            class BrowserNavigateSchema(BaseModel):
+                url: str = Field(..., description="Web URL to navigate to")
+                timeout_seconds: int = Field(30, description="Navigation timeout in seconds")
+
+            self.register(ToolDefinition(
+                tool_id="browser.navigate",
+                description="Navigate active browser session to URL with readiness verification",
+                input_schema=BrowserNavigateSchema,
+                handler=lambda url, timeout_seconds=30: browser_driver.navigate_to(url, timeout=timeout_seconds * 1000),
+                risk_level="SAFE",
+                timeout_seconds=35,
+                capability="browser",
+            ))
+
+            class BrowserClickSchema(BaseModel):
+                selector: Optional[str] = Field(None, description="CSS or text selector")
+                text: Optional[str] = Field(None, description="Accessible element text")
+                role: Optional[str] = Field(None, description="ARIA role (button, link, searchbox)")
+
+            self.register(ToolDefinition(
+                tool_id="browser.click",
+                description="Click interactive element in browser using CSS or semantic locators",
+                input_schema=BrowserClickSchema,
+                handler=lambda selector=None, text=None, role=None: (
+                    browser_driver.click_semantic(text=text, role=role) if (text or role)
+                    else browser_driver.click_element(selector or "")
+                ),
+                risk_level="MODERATE",
+                timeout_seconds=15,
+                capability="browser",
+            ))
+
+            class BrowserFillSchema(BaseModel):
+                text: str = Field(..., description="Text value to enter")
+                selector: Optional[str] = Field(None, description="CSS or text selector")
+                placeholder: Optional[str] = Field(None, description="Input placeholder text")
+
+            self.register(ToolDefinition(
+                tool_id="browser.fill",
+                description="Fill text into input element using CSS or placeholder locators",
+                input_schema=BrowserFillSchema,
+                handler=lambda text, selector=None, placeholder=None: (
+                    browser_driver.fill_semantic(placeholder=placeholder, text=text) if placeholder
+                    else browser_driver.fill_element(selector or "", text)
+                ),
+                risk_level="MODERATE",
+                timeout_seconds=15,
+                capability="browser",
+            ))
+
+            class BrowserInspectSchema(BaseModel):
+                pass
+
+            self.register(ToolDefinition(
+                tool_id="browser.inspect_dom",
+                description="Extract interactive accessibility and clickable element boundaries from browser",
+                input_schema=BrowserInspectSchema,
+                handler=lambda: browser_driver.get_active_elements(),
+                risk_level="SAFE",
+                timeout_seconds=10,
+                capability="browser",
+            ))
+
+            class BookingParseIntentSchema(BaseModel):
+                query: str = Field(..., description="Natural language booking query")
+                default_city: Optional[str] = Field(None, description="Optional default city if not in query")
+
+            self.register(ToolDefinition(
+                tool_id="booking.parse_intent",
+                description="Parse structured booking intent from natural language",
+                input_schema=BookingParseIntentSchema,
+                handler=lambda query, default_city=None: parse_booking_intent(query, default_city=default_city).model_dump(),
+                risk_level="SAFE",
+                timeout_seconds=5,
+                capability="booking",
+            ))
+
+            class BookingExecuteSchema(BaseModel):
+                command: str = Field(..., description="Natural language booking command or prompt")
+                site_url: Optional[str] = Field(None, description="Target ticketing URL or mock server")
+                auto_authorize: bool = Field(False, description="Whether operator grants immediate final submission authorization")
+
+            self.register(ToolDefinition(
+                tool_id="booking.execute",
+                description="Execute end-to-end verified ticket booking flow halting safely at confirmation gate",
+                input_schema=BookingExecuteSchema,
+                handler=lambda command, site_url=None, auto_authorize=False: jarvis_ticket_booker.execute_booking_flow(
+                    parse_booking_intent(command),
+                    site_url=site_url,
+                    auto_authorize=auto_authorize
+                ),
+                risk_level="MODERATE",
+                timeout_seconds=60,
+                capability="booking",
+            ))
+
         except Exception:
             pass
+
 
 
 tool_registry = ToolRegistry()
