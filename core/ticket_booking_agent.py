@@ -354,18 +354,40 @@ class JarvisTicketBooker:
                 return {"status": "ERROR", "error": f"Movie '{movie_name}' not found on the page."}
 
             # Check for Book Tickets button
-            book_btn = await self.page.query_selector("text='Book tickets', text='Book Tickets', button:has-text('Book')")
-            if book_btn and await book_btn.is_visible():
+            book_btn = None
+            for b_sel in [
+                "button:has-text('Book tickets')",
+                "button:has-text('Book Tickets')",
+                "button:has-text('Book')",
+                "a:has-text('Book tickets')",
+                "div[role='button']:has-text('Book')"
+            ]:
+                try:
+                    el = await self.page.query_selector(b_sel)
+                    if el and await el.is_visible():
+                        book_btn = el
+                        break
+                except Exception:
+                    continue
+
+            if book_btn:
                 await book_btn.click()
                 await self.page.wait_for_timeout(2500)
             else:
                 return {"status": "ERROR", "error": f"Book button for '{movie_name}' not found or not clickable."}
 
             # 3. Handle Language/Format Selection (e.g., 2D, 3D, English)
-            # Sometimes there are multiple buttons. We just click the first available 2D or English if possible.
             try:
-                format_btn = await self.page.query_selector("text='2D', text='English', section span:has-text('2D')")
-                if format_btn and await format_btn.is_visible():
+                format_btn = None
+                for f_sel in ["button:has-text('2D')", "span:has-text('2D')", "div:has-text('2D')", "text=2D", "text=English"]:
+                    try:
+                        el = await self.page.query_selector(f_sel)
+                        if el and await el.is_visible():
+                            format_btn = el
+                            break
+                    except Exception:
+                        continue
+                if format_btn:
                     await format_btn.click()
                     await self.page.wait_for_timeout(2000)
             except Exception:
@@ -377,39 +399,75 @@ class JarvisTicketBooker:
             # 4. Wait for Showtimes page (buytickets URL)
             current_url = self.page.url
             if "buytickets" not in current_url.lower():
-                await self.page.wait_for_url("**/*buytickets*", timeout=15000)
+                try:
+                    await self.page.wait_for_url("**/*buytickets*", timeout=15000)
+                except Exception:
+                    pass
             
             # 5. Select a Showtime
             print("[BOOKMYSHOW] Scanning for available showtimes...")
-            # 'showtime-pill' or generic 'time' classes are common on BookMyShow
-            showtime = await self.page.query_selector("a.showtime-pill, div.showtime-pill, div[data-availability='A']")
-            if showtime and await showtime.is_visible():
+            showtime = None
+            for st_sel in [
+                "div[role='button'][aria-label*='PM']",
+                "div[role='button'][aria-label*='AM']",
+                "a.showtime-pill",
+                "div.showtime-pill",
+                "div[data-availability='A']",
+                "div[class*='showtime']"
+            ]:
+                try:
+                    el = await self.page.query_selector(st_sel)
+                    if el and await el.is_visible():
+                        showtime = el
+                        break
+                except Exception:
+                    continue
+
+            if showtime:
                 await showtime.click()
                 await self.page.wait_for_timeout(2000)
             else:
                 return {"status": "ERROR", "error": "No available showtimes found on the buytickets page."}
             
             # 6. Terms & Conditions popup
-            try:
-                accept_btn = await self.page.query_selector("text='Accept', button#btnPopupAccept")
-                if accept_btn and await accept_btn.is_visible():
-                    await accept_btn.click()
-                    await self.page.wait_for_timeout(1500)
-            except Exception:
-                pass
+            for t_sel in ["button:has-text('Accept')", "button#btnPopupAccept"]:
+                try:
+                    accept_btn = await self.page.query_selector(t_sel)
+                    if accept_btn and await accept_btn.is_visible():
+                        await accept_btn.click()
+                        await self.page.wait_for_timeout(1500)
+                        break
+                except Exception:
+                    continue
             
             # 7. Quantity Selection Modal
             print(f"[BOOKMYSHOW] Selecting {seats} seats...")
             try:
-                # Click the exact number of seats
-                seat_num = await self.page.query_selector(f"ul#popQty li[data-qty='{seats}'], text='{seats}'")
-                if seat_num and await seat_num.is_visible():
+                # Select exact seat quantity
+                seat_num = None
+                for q_sel in [f"ul#popQty li[data-qty='{seats}']", f"li#quantity-{seats}", f"button:has-text('{seats}')"]:
+                    try:
+                        q_el = await self.page.query_selector(q_sel)
+                        if q_el and await q_el.is_visible():
+                            seat_num = q_el
+                            break
+                    except Exception:
+                        continue
+                if seat_num:
                     await seat_num.click()
                     await self.page.wait_for_timeout(500)
                 
                 # Click 'Select Seats' button
-                select_seats_btn = await self.page.query_selector("button#btmcntbook, text='Select Seats'")
-                if select_seats_btn and await select_seats_btn.is_visible():
+                select_seats_btn = None
+                for s_sel in ["button:has-text('Select Seats')", "button#btmcntbook"]:
+                    try:
+                        s_el = await self.page.query_selector(s_sel)
+                        if s_el and await s_el.is_visible():
+                            select_seats_btn = s_el
+                            break
+                    except Exception:
+                        continue
+                if select_seats_btn:
                     await select_seats_btn.click()
                     await self.page.wait_for_timeout(3000)
             except Exception as e:
@@ -431,9 +489,17 @@ class JarvisTicketBooker:
                 print("[VISION_HANDOFF] Seats selected visually! Proceeding to Payment Gate...")
                 await self.page.wait_for_timeout(2000)
                 
-                # Now the "Pay Rs." button should appear in the DOM
-                pay_btn = await self.page.query_selector("a#btmcntbook, button:has-text('Pay Rs.')")
-                if pay_btn and await pay_btn.is_visible():
+                # Now the "Pay" button should appear in the DOM
+                pay_btn = None
+                for p_sel in ["button:has-text('Pay')", "a#btmcntbook", "div[role='button']:has-text('Pay')", "div:has-text('Pay ₹')"]:
+                    try:
+                        el = await self.page.query_selector(p_sel)
+                        if el and await el.is_visible():
+                            pay_btn = el
+                            break
+                    except Exception:
+                        continue
+                if pay_btn:
                     await pay_btn.click()
                     await self.page.wait_for_timeout(3000)
                     
