@@ -12,16 +12,32 @@ class ActorPipeline:
         
         controller_action = action_type
         payload = {}
-        if action_type == "OPEN_APP":
+        act_up = action_type.upper()
+        if act_up in ("OPEN_APP", "OPEN_APPLICATION", "LAUNCH_APP", "START_APP"):
             controller_action = "APP_OPEN"
             payload = {"app_name": target}
-        elif action_type == "CLICK" and mapped_coords:
+        elif act_up in ("OPEN_WEB_BROWSER", "BROWSER_OPEN", "BROWSER_NAVIGATE", "NAVIGATE_URL", "OPEN_URL", "BROWSER"):
+            controller_action = "OPEN_WEB_BROWSER"
+            payload = {"url": text_payload or target or "https://www.google.com", "target": target}
+        elif act_up in ("CLICK", "LEFT_CLICK", "DOUBLE_CLICK", "RIGHT_CLICK", "MOVE"):
             controller_action = "UI_AUTOMATION"
-            payload = {"action": "click", "coords": mapped_coords}
-        elif action_type == "TYPE" and mapped_coords:
+            payload = {"action": act_up.lower(), "coords": mapped_coords}
+        elif act_up in ("TYPE", "WRITE"):
             controller_action = "UI_AUTOMATION"
-            payload = {"action": "type", "coords": mapped_coords, "text": text_payload or ""}
-        elif action_type == "WAIT":
+            payload = {"action": "type", "coords": mapped_coords, "text": text_payload or target or ""}
+        elif act_up in ("HOTKEY", "SHORTCUT"):
+            controller_action = "UI_AUTOMATION"
+            payload = {"action": "hotkey", "key": text_payload or target or ""}
+        elif act_up in ("PRESS", "KEY_PRESS"):
+            controller_action = "UI_AUTOMATION"
+            payload = {"action": "press", "key": text_payload or target or ""}
+        elif act_up == "SCROLL":
+            controller_action = "UI_AUTOMATION"
+            payload = {"action": "scroll", "clicks": -300}
+        elif act_up in ("VERIFY_FILE", "VERIFY_CALCULATION", "VERIFY"):
+            controller_action = "VERIFY"
+            payload = {"type": act_up, "target": target, "expected": text_payload}
+        elif act_up == "WAIT":
             controller_action = "OS_COMMAND"
             payload = {"command": "echo waiting"}
 

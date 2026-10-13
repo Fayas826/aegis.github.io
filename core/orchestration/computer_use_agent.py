@@ -71,20 +71,21 @@ class ComputerUseAgent:
         self.current_step = 0
         self.bounding_boxes = []
         
+        _dp = None
         try:
-            from core.ui.desktop_perimeter_overlay import desktop_perimeter
-            desktop_perimeter.activate("A.E.G.I.S. VISION & DESKTOP ACTIVE")
+            from core.ui.desktop_perimeter_overlay import desktop_perimeter as _dp
+            _dp.activate("A.E.G.I.S. VISION & DESKTOP ACTIVE")
         except Exception:
             pass
 
         try:
             return await self._execute_task_internal(task_description)
         finally:
-            try:
-                from core.ui.desktop_perimeter_overlay import desktop_perimeter
-                desktop_perimeter.deactivate()
-            except Exception:
-                pass
+            if _dp is not None:
+                try:
+                    _dp.deactivate()
+                except Exception:
+                    pass
 
     async def _execute_task_internal(self, task_description: str) -> Dict[str, Any]:
         active_recipe = None
@@ -124,6 +125,34 @@ class ComputerUseAgent:
                 print(f"[COMPUTER_USE] Detected general web workflow. Initiating Swarm Handoff to Vision Agent.")
                 raise SwarmHandoff("vision", task_description, {"source": "computer_use"})
 
+
+        # Phase 4.3: Authoritative Single-Task Coordinator for desktop workflows
+        try:
+            from core.orchestration.single_task_coordinator import single_task_coordinator
+            coord_res = await single_task_coordinator.execute_interactive_task(task_description)
+            if coord_res.get("status") == "SUCCEEDED":
+                return {
+                    "status": "SUCCESS",
+                    "result": coord_res["final_result"]["summary"],
+                    "task_id": coord_res["task_id"],
+                    "steps_executed": len(coord_res.get("steps", [])),
+                    "steps": coord_res.get("steps", []),
+                }
+            elif coord_res.get("status") == "CANCELLED":
+                return {
+                    "status": "CANCELLED",
+                    "reason": "Task was cancelled by operator.",
+                    "task_id": coord_res["task_id"],
+                }
+            else:
+                return {
+                    "status": "FAILED",
+                    "reason": coord_res.get("reason", "Interactive execution failed."),
+                    "task_id": coord_res["task_id"],
+                    "steps": coord_res.get("steps", []),
+                }
+        except Exception as e_coord:
+            print(f"[COMPUTER_USE] SingleTaskCoordinator exception: {e_coord}")
 
         self.target_application = None
         is_final_step = False
@@ -238,7 +267,7 @@ class ComputerUseAgent:
                     if target_app_lower not in active_win and target_app_lower not in active_proc:
                         # Attempt to bring the target application to the foreground
                         try:
-                            from core.execution.universal_desktop_controller import universal_controller
+                            from core.execution.universal_desktop_controller import desktop_controller as universal_controller
                             print(f"[COMPUTER_USE] Target '{self.target_application}' not in foreground (active='{active_win}'). Attempting focus takeover...")
                             focused_hwnd = universal_controller.focus_application(self.target_application, minimize_others=False)
                             if focused_hwnd:
@@ -264,7 +293,6 @@ class ComputerUseAgent:
                 print(f"[COMPUTER_USE] Traditional grounding confidence ({self.confidence_score}%). Engaging OmniParser v2 Set-of-Marks Visual Grounding...")
                 try:
                     from core.perception.omni_parser import omni_parser
-                    from core.perception.llava_client import llava_client
                     import re
                     
                     # 1. Parse screen with OmniParser to get numbered badges

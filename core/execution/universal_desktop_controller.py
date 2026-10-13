@@ -52,16 +52,13 @@ class UniversalDesktopController:
             logger.warning(f"Failed setting ctypes signatures: {e}")
 
     def attach_to_interactive_station(self) -> bool:
-        """Attach thread to Windows WinSta0\\Default desktop session if running in background thread."""
+        """Attach thread to Windows interactive input desktop session if running in background thread."""
         try:
-            # Check if GetForegroundWindow is already functional
-            fg = self.user32.GetForegroundWindow()
-            if fg:
-                return True
-            h_desk = self.user32.OpenDesktopW("Default", 0, False, 0x01FF)
+            h_desk = self.user32.OpenInputDesktop(0, False, 0x01FF)
+            if not h_desk:
+                h_desk = self.user32.OpenDesktopW("Default", 0, False, 0x01FF)
             if h_desk:
                 self.user32.SetThreadDesktop(h_desk)
-                self.user32.CloseDesktop(h_desk)
             return True
         except Exception as e:
             logger.warning(f"Interactive station attachment exception: {e}")
@@ -84,33 +81,30 @@ class UniversalDesktopController:
 
     def list_visible_windows(self) -> List[Tuple[int, str]]:
         """List all top-level visible application windows on the interactive desktop."""
-        try:
-            import win32gui
-            windows = []
-            def enum_cb(hwnd, extra):
-                if win32gui.IsWindowVisible(hwnd):
-                    text = win32gui.GetWindowText(hwnd)
-                    if text and text.strip():
-                        extra.append((hwnd, text.strip()))
-            win32gui.EnumWindows(enum_cb, windows)
-            return windows
-        except Exception:
-            self.attach_to_interactive_station()
-            windows = []
-            def enum_cb(hwnd, _):
-                if self.user32.IsWindowVisible(hwnd):
-                    length = self.user32.GetWindowTextLengthW(hwnd)
-                    if length > 0:
-                        buff = ctypes.create_unicode_buffer(length + 1)
-                        self.user32.GetWindowTextW(hwnd, buff, length + 1)
-                        if buff.value.strip():
-                            windows.append((hwnd, buff.value))
-                return True
+        self.attach_to_interactive_station()
+        windows: List[Tuple[int, str]] = []
+        import ctypes.wintypes as wintypes
 
-            import ctypes.wintypes as wintypes
-            cb = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)(enum_cb)
+        def enum_cb(hwnd, _):
+            if self.user32.IsWindowVisible(hwnd):
+                length = self.user32.GetWindowTextLengthW(hwnd)
+                if length > 0:
+                    buff = ctypes.create_unicode_buffer(length + 1)
+                    self.user32.GetWindowTextW(hwnd, buff, length + 1)
+                    val = buff.value.strip()
+                    if val:
+                        windows.append((hwnd, val))
+            return True
+
+        cb = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)(enum_cb)
+        h_desk = self.user32.OpenInputDesktop(0, False, 0x01FF)
+        if h_desk:
+            self.user32.EnumDesktopWindows(h_desk, cb, 0)
+            self.user32.CloseDesktop(h_desk)
+        else:
             self.user32.EnumWindows(cb, 0)
-            return windows
+
+        return windows
 
     def force_foreground_window(self, target_hwnd: int, minimize_current_fg: bool = False) -> bool:
         """

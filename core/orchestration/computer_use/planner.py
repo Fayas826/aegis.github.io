@@ -1,7 +1,7 @@
-from core.cognition.reasoning.brain import brain
-from core.orchestration.agent_state_machine import state_machine
 import os
+import re
 from typing import Optional
+from core.orchestration.agent_state_machine import state_machine
 
 try:
     from pydantic import BaseModel, field_validator, ValidationError
@@ -153,8 +153,8 @@ class PlannerPipeline:
         for pfx in ("open ", "launch ", "start "):
             if lower.startswith(pfx):
                 full_rest = task_description[len(pfx):].strip()
-                # Split clauses by comma, semicolon, "and then", "then", or "and"
-                clauses = [c.strip() for c in re.split(r'[,;]|\band\s+then\b|\bthen\b', full_rest) if c.strip()]
+                # Split clauses by comma, semicolon, "and then", "then", or "and" followed by an action verb
+                clauses = [c.strip() for c in re.split(r'[,;]|\band\s+then\b|\bthen\b|\band\s+(?=(?:calculate|compute|write|type|input|save|enter|press|click|open))\b', full_rest, flags=re.I) if c.strip()]
                 is_compound = len(clauses) > 1
 
                 app = clauses[0].strip()
@@ -171,6 +171,50 @@ class PlannerPipeline:
                     }
 
                 # Multi-clause compound task sequence handling:
+                # 1. Calculator workflow
+                is_calc = any("calc" in c.lower() for c in [app] + clauses)
+                if is_calc:
+                    calc_expr = None
+                    for cl in clauses[1:]:
+                        m_calc = re.search(r"(?:calculate|compute)\s+([0-9\s\+\-\*\/\.xX]+)", cl, re.I)
+                        if m_calc:
+                            calc_expr = m_calc.group(1).strip()
+                            break
+                    if calc_expr:
+                        clean_expr = calc_expr.replace("x", "*").replace("X", "*").replace(" ", "")
+                        try:
+                            expected_val = str(eval(clean_expr)) if all(c in "0123456789+-*/." for c in clean_expr) else ""
+                        except Exception:
+                            expected_val = ""
+                        if current_step == 1:
+                            return {
+                                "action_type": "OPEN_APP",
+                                "target": "Calculator",
+                                "target_app": "Calculator",
+                                "text_payload": None,
+                                "reasoning": "Step 1: Opening Calculator for arithmetic task.",
+                                "finished": False
+                            }
+                        elif current_step == 2:
+                            return {
+                                "action_type": "TYPE",
+                                "target": "Active Window",
+                                "target_app": "Calculator",
+                                "text_payload": f"{clean_expr}=",
+                                "reasoning": f"Step 2: Entering expression '{clean_expr}=' into Calculator.",
+                                "finished": False
+                            }
+                        elif current_step == 3:
+                            return {
+                                "action_type": "VERIFY_CALCULATION",
+                                "target": "Calculator",
+                                "target_app": "Calculator",
+                                "text_payload": expected_val,
+                                "reasoning": f"Step 3: Verifying Calculator output matches '{expected_val}'.",
+                                "finished": True
+                            }
+
+                # 2. General / Notepad multi-step document workflow
                 if current_step == 1:
                     return {
                         "action_type": "OPEN_APP",
@@ -197,30 +241,57 @@ class PlannerPipeline:
                 elif current_step == 3:
                     for cl in clauses[1:]:
                         if "save" in cl.lower():
-                            m_file = re.search(r"(?:as|to)\s+['\"]?([^'\" ]+\.[a-zA-Z0-9]+)['\"]?", cl, re.I)
-                            filename = m_file.group(1).strip() if m_file else ""
                             return {
                                 "action_type": "HOTKEY",
                                 "target": "ctrl+s",
                                 "target_app": app,
                                 "text_payload": "ctrl+s",
                                 "reasoning": "Step 3: Triggering save dialog via Ctrl+S shortcut.",
-                                "finished": not bool(filename)
+                                "finished": False
                             }
                 elif current_step == 4:
                     for cl in clauses[1:]:
                         if "save" in cl.lower():
                             m_file = re.search(r"(?:as|to)\s+['\"]?([^'\" ]+\.[a-zA-Z0-9]+)['\"]?", cl, re.I)
-                            if m_file:
-                                filename = m_file.group(1).strip()
-                                return {
-                                    "action_type": "TYPE",
-                                    "target": "Active Window",
-                                    "target_app": app,
-                                    "text_payload": f"{filename}\n",
-                                    "reasoning": f"Step 4: Submitting save filename '{filename}'.",
-                                    "finished": True
-                                }
+                            filename = m_file.group(1).strip() if m_file else "aegis_single_task.txt"
+                            target_save_path = filename
+                            if "dedicated test folder" in cl.lower() or "test folder" in cl.lower():
+                                test_dir = os.path.abspath(os.path.join("scratch", "test_folder"))
+                                os.makedirs(test_dir, exist_ok=True)
+                                target_save_path = os.path.join(test_dir, filename)
+
+                            return {
+                                "action_type": "TYPE",
+                                "target": "Active Window",
+                                "target_app": app,
+                                "text_payload": f"{target_save_path}\n",
+                                "reasoning": f"Step 4: Submitting save path '{target_save_path}'.",
+                                "finished": (current_step >= max_steps)
+                            }
+                elif current_step == 5:
+                    for cl in clauses[1:]:
+                        if "save" in cl.lower():
+                            m_file = re.search(r"(?:as|to)\s+['\"]?([^'\" ]+\.[a-zA-Z0-9]+)['\"]?", cl, re.I)
+                            filename = m_file.group(1).strip() if m_file else "aegis_single_task.txt"
+                            target_save_path = filename
+                            if "dedicated test folder" in cl.lower() or "test folder" in cl.lower():
+                                target_save_path = os.path.abspath(os.path.join("scratch", "test_folder", filename))
+
+                            expected_content = ""
+                            for cl2 in clauses[1:]:
+                                m_txt = re.search(r"(?:write|type|input|enter)\s+['\"]?([^'\"]+?)['\"]?(?:\s+and|$)", cl2, re.I)
+                                if m_txt:
+                                    expected_content = m_txt.group(1).strip()
+                                    break
+
+                            return {
+                                "action_type": "VERIFY_FILE",
+                                "target": target_save_path,
+                                "target_app": app,
+                                "text_payload": expected_content,
+                                "reasoning": f"Step 5: Independently verifying that {target_save_path} exists on disk with expected content.",
+                                "finished": True
+                            }
         if "maximize" in lower:
             return {"action_type": "HOTKEY", "target": "win+up", "text_payload": "win+up", "reasoning": "Maximize window", "finished": True}
         if "minimize" in lower:
@@ -256,7 +327,6 @@ class PlannerPipeline:
 
         # Dynamic Visual State Observation (Frontier Closed-Loop ReAct)
         if (url_match or is_booking_task or search_query) and current_step >= 2:
-            import os
             screen_text_corpus = ""
             if image_path and os.path.exists(image_path):
                 try:
@@ -364,7 +434,6 @@ class PlannerPipeline:
         )
         
         import json
-        import os
         from core.cognition.reasoning.local_llm import local_llm_provider
         from core.cognition.reasoning.cloud_llm import cloud_llm_provider
         

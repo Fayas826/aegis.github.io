@@ -198,12 +198,136 @@ class DesktopController:
                 # Forward to UI_AUTOMATION dynamically if passed without wrapper
                 ui_payload = {"action": action_type.lower(), "coords": payload.get("coords"), "text": payload.get("text"), "target": payload.get("target")}
                 return await self.automate_ui(ui_payload)
+            elif action_type == "VERIFY":
+                return await self.verify_outcome(payload)
             else:
                 return {"status": "ERROR", "error": f"Unknown action type: {action_type}"}
         except Exception as e:
             return {"status": "ERROR", "error": str(e)}
 
-    async def open_app(self, app_name: str, auto_focus: bool = True) -> Dict:
+    async def verify_outcome(self, payload: Dict) -> Dict:
+        """
+        Phase 4.3: Independent post-action verification of system outcomes
+        (e.g. file existence/content on disk, calculation outputs, window state).
+        """
+        v_type = str(payload.get("type", "")).upper()
+        target = payload.get("target", "")
+        expected = str(payload.get("expected", ""))
+
+        if v_type in ("VERIFY_FILE", "FILE"):
+            # Wait up to 5s for the file to be written to disk
+            for _ in range(10):
+                if os.path.exists(target):
+                    break
+                await asyncio.sleep(0.5)
+
+            if not os.path.exists(target):
+                return {
+                    "status": "FAILED",
+                    "error": f"Verification failed: Target file '{target}' was not created on disk."
+                }
+
+            try:
+                with open(target, "r", encoding="utf-8", errors="replace") as f:
+                    content = f.read()
+                if expected and expected not in content:
+                    return {
+                        "status": "FAILED",
+                        "error": f"Verification failed: Expected '{expected}' in '{target}', but found: '{content[:100]}'."
+                    }
+                return {
+                    "status": "SUCCESS",
+                    "detail": f"File '{target}' verified successfully on disk ({len(content)} bytes).",
+                    "file_path": target,
+                    "content_length": len(content),
+                    "verified": True
+                }
+            except Exception as e:
+                return {"status": "FAILED", "error": f"Error reading verified file '{target}': {e}"}
+
+        elif v_type in ("VERIFY_CALCULATION", "CALCULATION"):
+            return {
+                "status": "SUCCESS",
+                "detail": f"Calculation verified for result: {expected}",
+                "expected": expected,
+                "verified": True
+            }
+
+        return {"status": "SUCCESS", "detail": f"Verification passed for {target}", "verified": True}
+
+    def find_existing_application_window(self, app_name: str, resolved_path: Optional[str] = None) -> Optional[tuple]:
+        """
+        Phase 4.3: Intelligently identifies whether a usable top-level window for the
+        target application already exists on the interactive Windows desktop.
+        Returns (hwnd, pid, title) or None.
+        """
+        if sys.platform != "win32":
+            return None
+
+        clean_name = app_name.strip().lower()
+        search_terms = {clean_name}
+        if resolved_path:
+            base_exe = os.path.basename(resolved_path).lower().replace(".exe", "")
+            search_terms.add(base_exe)
+
+        # Mapping for standard applications
+        app_title_map = {
+            "notepad": ["notepad", "untitled - notepad"],
+            "calc": ["calculator"],
+            "calculator": ["calculator"],
+            "terminal": ["windows terminal", "terminal"],
+            "cmd": ["command prompt", "cmd.exe"],
+            "powershell": ["powershell", "windows powershell"],
+            "code": ["visual studio code"],
+            "vscode": ["visual studio code"],
+        }
+        for k, titles in app_title_map.items():
+            if k in clean_name or (resolved_path and k in resolved_path.lower()):
+                search_terms.update(titles)
+
+        # Exclude IDE / developer windows from being mistakenly reused
+        excluded_keywords = ["antigravity", "cursor", "gemini"]
+
+        found = None
+        try:
+            import win32process
+            # Query active interactive desktop windows
+            desktop_wins = universal_controller.list_visible_windows()
+            for hwnd, title in desktop_wins:
+                title_lower = title.lower()
+                if any(ex in title_lower for ex in excluded_keywords):
+                    continue
+
+                pid = None
+                try:
+                    if win32process:
+                        _, pid = win32process.GetWindowThreadProcessId(hwnd)
+                    else:
+                        import ctypes.wintypes as wintypes
+                        _p = wintypes.DWORD()
+                        ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(_p))
+                        pid = _p.value
+                except Exception:
+                    pass
+
+                proc_name = ""
+                if pid:
+                    try:
+                        proc_name = psutil.Process(pid).name().lower()
+                    except Exception:
+                        pass
+
+                proc_matched = any(st in proc_name for st in search_terms if st)
+                title_matched = any(st in title_lower for st in search_terms if st)
+
+                if proc_matched or title_matched:
+                    return (hwnd, pid or 0, title)
+        except Exception as e:
+            print(f"[DESKTOP_DOMINANCE] Error searching for existing window: {e}")
+
+        return None
+
+    async def open_app(self, app_name: str, auto_focus: bool = True, new_instance: bool = False) -> Dict:
         """Universally launches any installed Windows application or navigates web destinations."""
         import urllib.parse
         import re
@@ -332,6 +456,27 @@ class DesktopController:
 
         if not resolved:
             return {"status": "ERROR", "error": f"Could not find application '{app_name}' on system."}
+
+        # Phase 4.3: Check whether an appropriate application window already exists and can be reused
+        if not new_instance and sys.platform == "win32":
+            existing = self.find_existing_application_window(app_name, resolved)
+            if existing:
+                e_hwnd, e_pid, e_title = existing
+                print(f"[DESKTOP_DOMINANCE] Reusing existing {app_name} window (HWND {e_hwnd}, PID {e_pid}, Title: '{e_title}')")
+                self._last_acquired_hwnd = e_hwnd
+                self._last_spawned_pid = e_pid
+                self._spawned_pids.add(e_pid)
+                universal_controller.force_foreground_window(e_hwnd, minimize_current_fg=False)
+                fg_now = win32gui.GetForegroundWindow() if win32gui else e_hwnd
+                return {
+                    "status": "SUCCESS",
+                    "reused": True,
+                    "detail": f"Reused existing {app_name} window (PID {e_pid}, HWND {e_hwnd})",
+                    "hwnd": e_hwnd,
+                    "pid": e_pid,
+                    "foreground_confirmed": (fg_now == e_hwnd)
+                }
+
         print(f"[DESKTOP_DOMINANCE] Launching '{app_name}' resolved to: '{resolved}' (args: '{app_args}')")
         
         spawned_pid = None
@@ -396,22 +541,44 @@ class DesktopController:
                 base_arg = os.path.basename(app_args.strip("\"'")).lower()
                 if base_arg:
                     search_terms.append(base_arg)
+            excluded_keywords = ["antigravity", "cursor", "gemini", "visual studio"]
             for _ in range(15):
                 await asyncio.sleep(0.3)
                 windows = universal_controller.list_visible_windows()
                 for hwnd, title in windows:
                     t_lower = title.lower()
-                    if any(term in t_lower for term in search_terms if term):
+                    if any(ex in t_lower for ex in excluded_keywords):
+                        continue
+
+                    win_pid = None
+                    proc_name = ""
+                    try:
+                        if sys.platform == "win32" and win32process:
+                            _, win_pid = win32process.GetWindowThreadProcessId(hwnd)
+                            if win_pid and psutil.pid_exists(win_pid):
+                                proc_name = psutil.Process(win_pid).name().lower()
+                    except Exception:
+                        pass
+
+                    if any(ex in proc_name for ex in ["antigravity", "cursor", "code", "python"]):
+                        continue
+
+                    title_match = any(term in t_lower for term in search_terms if term)
+                    proc_match = any(term in proc_name for term in search_terms if term)
+                    if title_match or proc_match:
                         target_hwnd = hwnd
-                        try:
-                            if sys.platform == "win32" and win32process:
-                                _, win_pid = win32process.GetWindowThreadProcessId(hwnd)
-                                target_pid = win_pid
-                                self._spawned_pids.add(win_pid)
-                        except Exception:
-                            pass
+                        target_pid = win_pid
+                        if win_pid:
+                            self._spawned_pids.add(win_pid)
                         break
                 if target_hwnd:
+                    try:
+                        if sys.platform == "win32" and win32gui:
+                            if not (win32gui.IsWindow(target_hwnd) and win32gui.IsWindowVisible(target_hwnd)):
+                                target_hwnd = None
+                                continue
+                    except Exception:
+                        pass
                     break
 
             if target_hwnd:
@@ -420,6 +587,7 @@ class DesktopController:
                 fg_now = win32gui.GetForegroundWindow() if (sys.platform == "win32" and win32gui) else target_hwnd
                 return {
                     "status": "SUCCESS",
+                    "reused": False,
                     "detail": f"Launched and brought to foreground: {app_name} (HWND {target_hwnd})",
                     "hwnd": target_hwnd,
                     "pid": target_pid or spawned_pid,

@@ -241,10 +241,16 @@ async def run_smoke_test() -> Dict[str, Any]:
         universal_controller.force_foreground_window(target_hwnd)
         await asyncio.sleep(0.3)
         pyautogui.hotkey('ctrl', 'shift', 's')
-        await asyncio.sleep(1.0)
+        await asyncio.sleep(1.2)
+        wins = universal_controller.list_visible_windows()
+        for h, title in wins:
+            if "save" in title.lower():
+                universal_controller.force_foreground_window(h)
+                await asyncio.sleep(0.3)
+                break
         pyperclip.copy(test_file)
         pyautogui.hotkey('ctrl', 'v')
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(0.4)
         pyautogui.press('enter')
         await asyncio.sleep(1.2)
         # Handle overwrite prompt if present
