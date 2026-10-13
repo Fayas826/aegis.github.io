@@ -332,6 +332,10 @@ async def run_smoke_test() -> Dict[str, Any]:
         if pids_final:
             dc.cleanup_spawned_processes(pids_final)
 
+def test_notepad_smoke():
+    result = asyncio.run(run_smoke_test())
+    assert result.get("status") in ("PASSED", "BLOCKED")
+
 if __name__ == "__main__":
     result = asyncio.run(run_smoke_test())
     print("\n" + "=" * 60)

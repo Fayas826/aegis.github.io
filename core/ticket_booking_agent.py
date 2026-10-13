@@ -1,3 +1,4 @@
+import os
 """
 JARVIS AUTONOMOUS TICKET BOOKING & FORM AUTOFILL ENGINE
 ======================================================
@@ -28,17 +29,24 @@ if sys.platform == "win32":
     except Exception:
         pass
 
+import uuid
+import time
 from playwright.async_api import async_playwright, Page
 from core.memory.user_profile_vault import user_vault
 
 class JarvisTicketBooker:
     """Autonomous ticket booking & deep web agent for JARVIS."""
 
-    def __init__(self, headless: bool = False):
-        self.headless = headless
+    def __init__(self, headless: Optional[bool] = None, execution_mode: str = "visible"):
+        self.execution_mode = execution_mode
+        if headless is None:
+            self.headless = (execution_mode == "background")
+        else:
+            self.headless = headless
         self.browser = None
         self.page: Optional[Page] = None
         self.playwright = None
+        self.task_id = f"BKG-{uuid.uuid4().hex[:8].upper()}"
 
     async def start(self):
         # Reset stale handle if event loop changed
@@ -64,11 +72,15 @@ class JarvisTicketBooker:
             self.bring_to_foreground()
             return
 
-        # 2. Launch browser through unified browser_driver
-        self.page = await browser_driver.launch_browser(headless=self.headless, channel="chrome")
+        # 2. Launch browser through unified browser_driver with explicit execution mode
+        self.page = await browser_driver.launch_browser(
+            headless=self.headless,
+            execution_mode=self.execution_mode,
+            channel="chrome"
+        )
         self.browser = browser_driver.browser
         self.playwright = browser_driver.playwright
-        logger.info("[TICKET_AGENT] Autonomous browser environment ignited via browser_driver.")
+        logger.info(f"[TICKET_AGENT] Autonomous browser environment ignited via browser_driver in mode={self.execution_mode}.")
         self.bring_to_foreground()
         try:
             from core.ui.desktop_perimeter_overlay import desktop_perimeter
@@ -79,19 +91,60 @@ class JarvisTicketBooker:
     def bring_to_foreground(self):
         """Forces the active Chrome / ticketing window to be fully maximized and on top."""
         try:
-            import win32gui, win32con
-            def _enum_win(hwnd, _):
-                if win32gui.IsWindowVisible(hwnd):
-                    title = win32gui.GetWindowText(hwnd)
-                    if any(t in title.lower() for t in ("bookmyshow", "movie tickets", "cineaegis", "ticket")):
-                        win32gui.ShowWindow(hwnd, win32con.SW_MAXIMIZE)
-                        win32gui.SetWindowPos(hwnd, win32con.HWND_TOP, 0, 0, 0, 0, win32con.SWP_NOMOVE | win32con.SWP_NOSIZE)
-                        win32gui.SetForegroundWindow(hwnd)
-            win32gui.EnumWindows(_enum_win, None)
-        except Exception:
-            pass
+            from core.perception.browser_driver import browser_driver
+            return browser_driver.force_foreground()
+        except Exception as e:
+            logger.warning(f"[TICKET_AGENT] Failed to bring browser to foreground: {e}")
+            return {"status": "ERROR", "error": str(e)}
+
+    async def emit_progress(
+        self,
+        stage: str,
+        action: str,
+        outcome: str,
+        sm: Any = None,
+        is_pending_confirmation: bool = False
+    ) -> Dict[str, Any]:
+        """Publishes live execution progress, window state, and preview screenshot to enterprise_event_bus."""
+        try:
+            from core.perception.browser_driver import browser_driver
+            from core.orchestration.enterprise_event_bus import enterprise_event_bus
+            from core.config.runtime_config import runtime_config
+
+            url = await browser_driver.get_current_url()
+            title = await browser_driver.get_title()
+
+            screenshot_rel_path = f"scratch/live_preview_{int(time.time()*1000)}.png"
+            screenshot_full_path = os.path.join(runtime_config.BASE_DIR, screenshot_rel_path)
+            try:
+                if self.execution_mode == "visible":
+                    browser_driver.capture_desktop_preview(screenshot_full_path)
+                else:
+                    await browser_driver.take_screenshot(screenshot_full_path)
+            except Exception:
+                pass
+
+            payload = {
+                "task_id": getattr(sm.ctx, "task_id", self.task_id) if sm else self.task_id,
+                "mode": self.execution_mode,
+                "website": url,
+                "page_title": title,
+                "stage": stage,
+                "action": action,
+                "verified_outcome": outcome,
+                "window_state": browser_driver.window_state,
+                "is_pending_confirmation": is_pending_confirmation,
+                "screenshot_url": screenshot_rel_path if os.path.exists(screenshot_full_path) else None,
+                "timestamp": time.time()
+            }
+            enterprise_event_bus.publish("browser.execution.progress", payload, source_squad="ticketing")
+            return payload
+        except Exception as ex:
+            logger.warning(f"[TICKET_AGENT] Progress emission exception: {ex}")
+            return {}
 
     async def stop(self, close_browser: bool = False):
+
         try:
             from core.ui.desktop_perimeter_overlay import desktop_perimeter
             desktop_perimeter.deactivate()
@@ -929,6 +982,7 @@ class JarvisTicketBooker:
             await self.page.goto(target_url, wait_until="domcontentloaded", timeout=35000)
             await self.page.wait_for_timeout(1000)
             await self.handle_interruptions(intent.city or "Kochi")
+            self.bring_to_foreground()
 
             # Locate search input via semantic locators
             search_input = (
@@ -954,6 +1008,13 @@ class JarvisTicketBooker:
                 else:
                     await self.page.keyboard.press("Enter")
                 await self.page.wait_for_timeout(1000)
+
+            await self.emit_progress(
+                stage="SEARCHING",
+                action=f"Searching for '{intent.movie_name}' in {intent.city or 'Kochi'}",
+                outcome="SUCCESS",
+                sm=sm
+            )
 
             # 3. RESULTS VERIFICATION
             sm.transition_to(BookingState.RESULTS_VERIFICATION, "Verifying search results against requested title")
@@ -983,10 +1044,23 @@ class JarvisTicketBooker:
             if not matching_card:
                 sm.ctx.error = f"MOVIE_NOT_FOUND: '{intent.movie_name}' not found in search results."
                 sm.transition_to(BookingState.FAILED, "No matching movie found in search results")
+                await self.emit_progress(
+                    stage="RESULTS_VERIFICATION",
+                    action=f"Verify search results for '{intent.movie_name}'",
+                    outcome="MOVIE_NOT_FOUND",
+                    sm=sm
+                )
                 return {"status": "FAILED", "error": sm.ctx.error, "context": sm.ctx.model_dump()}
 
             sm.ctx.selected_movie = found_title or intent.movie_name
             sm.ctx.selected_city = intent.city or "Kochi"
+
+            await self.emit_progress(
+                stage="RESULTS_VERIFICATION",
+                action=f"Verified movie match: '{sm.ctx.selected_movie}'",
+                outcome="VERIFIED",
+                sm=sm
+            )
 
             # 4. SELECTION
             sm.transition_to(BookingState.SELECTION, "Selecting movie, date, showtime, and seats")
@@ -1048,6 +1122,13 @@ class JarvisTicketBooker:
                 await checkout_btn.click()
                 await self.page.wait_for_timeout(1000)
 
+            await self.emit_progress(
+                stage="SELECTION",
+                action=f"Selected showtime '{sm.ctx.selected_showtime}' and seats {sm.ctx.selected_seats}",
+                outcome="SEATS_SELECTED",
+                sm=sm
+            )
+
             # 5. DETAILS VERIFICATION
             sm.transition_to(BookingState.DETAILS_VERIFICATION, "Verifying order summary details and pricing")
             price_el = await self.page.query_selector("#summary-price, #seat-total-price, strong:has-text('₹')")
@@ -1062,12 +1143,26 @@ class JarvisTicketBooker:
             else:
                 sm.ctx.selected_venue = "JB Cinemas Screen 1"
 
+            await self.emit_progress(
+                stage="DETAILS_VERIFICATION",
+                action=f"Verified total price {sm.ctx.total_price} at {sm.ctx.selected_venue}",
+                outcome="DETAILS_VERIFIED",
+                sm=sm
+            )
+
             # 6. PENDING CONFIRMATION GATE
             sm.build_confirmation_summary()
             if not sm.transition_to(BookingState.PENDING_CONFIRMATION, "Halted at Human-in-the-Loop Confirmation Gate"):
                 return {"status": "FAILED", "error": sm.ctx.error, "context": sm.ctx.model_dump()}
 
             self.bring_to_foreground()
+            await self.emit_progress(
+                stage="PENDING_CONFIRMATION",
+                action="Halted at Human-in-the-Loop Confirmation Gate. Browser held open and visible for inspection.",
+                outcome="AWAITING_OPERATOR_AUTHORIZATION",
+                sm=sm,
+                is_pending_confirmation=True
+            )
 
             if not auto_authorize:
                 return {
@@ -1091,6 +1186,12 @@ class JarvisTicketBooker:
         except Exception as ex:
             sm.ctx.error = f"EXECUTION_EXCEPTION: {str(ex)}"
             sm.transition_to(BookingState.FAILED, str(ex))
+            await self.emit_progress(
+                stage="FAILED",
+                action="Booking execution failed",
+                outcome=str(ex),
+                sm=sm
+            )
             return {"status": "FAILED", "error": sm.ctx.error, "context": sm.ctx.model_dump()}
 
     async def authorize_and_submit(self, state_machine: Any) -> Dict[str, Any]:

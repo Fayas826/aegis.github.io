@@ -8,6 +8,7 @@ import TopMetrics from "@/features/hud/TopMetrics";
 import WeatherWidget from "@/features/hud/WeatherWidget";
 import TacticalThreatScanner from "@/features/scanners/TacticalThreatScanner";
 import CommandExecutionPanel from "@/features/hud/CommandExecutionPanel";
+import BrowserExecutionWidget from "@/features/hud/BrowserExecutionWidget";
 import NetworkHeatmap from "@/features/simulations/NetworkHeatmap";
 import Armory from "@/features/simulations/Armory";
 import SentienceEvolution from "@/features/simulations/SentienceEvolution";
@@ -85,6 +86,9 @@ export default function HUDLayer() {
         </div>
         <div className="pointer-events-auto w-full">
           <TacticalThreatScanner active={isInitialized} />
+        </div>
+        <div className="pointer-events-auto w-full">
+          <BrowserExecutionWidget />
         </div>
         <div className="pointer-events-auto w-full">
           <CommandExecutionPanel actions={[...(actionResults || []), ...forgeLogs]} />
