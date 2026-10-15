@@ -4,7 +4,8 @@ import Stripe from 'stripe';
 const router = express.Router();
 // Use a mocked or test key initially. For absolute reality, replace this via the .env file.
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || 'sk_test_mockKeyForNow', {
-  apiVersion: '2023-10-16',
+  // Let the installed SDK select its current compatible API version rather
+  // than pinning a version that its TypeScript declarations reject.
 });
 
 router.post('/create-checkout-session', async (req, res) => {
