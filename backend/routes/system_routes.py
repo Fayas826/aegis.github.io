@@ -140,11 +140,15 @@ async def tts_speak(text: str = "", voice: str = "", style: str = ""):
             
             # Analyze emotional vector with BERT to modulate pitch and speed dynamically (ChatGPT Voice feel)
             prosody = streaming_speech.get_emotional_prosody(clean_text)
+            prosody = streaming_speech.apply_voice_style(prosody, style)
             speed = prosody.get("speed", 1.0)
             
             persona = council_voice.get_persona(voice or "AEGIS_PRIME")
             kokoro_voice_name = persona.get("kokoro_voice", "af_heart")
             samples, sr = council_voice._kokoro.create(clean_text, voice=kokoro_voice_name, speed=speed)
+            pitch_semitones = float(prosody.get("pitch_semitones", 0.0) or 0.0)
+            if pitch_semitones:
+                samples = streaming_speech._apply_pitch_shift(samples, sr, pitch_semitones)
             buf = io.BytesIO()
             sf.write(buf, samples, sr, format="WAV")
             audio_bytes = buf.getvalue()
