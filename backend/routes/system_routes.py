@@ -2,7 +2,7 @@ import os
 import time
 import psutil
 from fastapi import APIRouter, Depends
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 import pyautogui
 from backend.middleware.auth import require_auth
 from action.desktop_control.bio_link import bio_link
@@ -48,11 +48,19 @@ async def get_system_screenshot():
         # Downscale slightly for web load performance
         screenshot.thumbnail((1280, 720))
         screenshot.save(screenshot_path, "PNG")
-    except Exception:
-        if not os.path.exists(screenshot_path):
-            from PIL import Image
-            blank = Image.new("RGB", (1280, 720), color=(30, 30, 30))
-            blank.save(screenshot_path, "PNG")
+    except Exception as capture_error:
+        # Never serve a stale frame or a fabricated blank image as if it were
+        # the current desktop.  Callers need an explicit, machine-readable
+        # failure so vision and automation can stop safely.
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "VISION_UNAVAILABLE",
+                "verified": False,
+                "error_code": "DESKTOP_SESSION_UNAVAILABLE",
+                "detail": str(capture_error),
+            },
+        )
     return FileResponse(screenshot_path, media_type="image/png")
 
 # Audio Cache to deliver <5ms replay latency for frequent phrases
@@ -175,9 +183,6 @@ async def tts_speak(text: str = "", voice: str = "", style: str = ""):
 # buttons. These endpoints drive the real native window over HTTP. The desktop
 # shell runs the backend in a daemon thread inside the same process that owns
 # the window, so this works even when the pywebview JS bridge has not loaded.
-from fastapi.responses import JSONResponse
-
-
 def _window_action(action):
     from core.runtime import window_control
     handlers = {
