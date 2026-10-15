@@ -1,8 +1,10 @@
 import os
 import time
+import asyncio
+import io
 import psutil
 from fastapi import APIRouter, Depends
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import Response, JSONResponse
 import pyautogui
 from backend.middleware.auth import require_auth
 from action.desktop_control.bio_link import bio_link
@@ -40,28 +42,51 @@ async def get_iot_state():
 
 @router.get("/system/screenshot", dependencies=[Depends(require_auth)])
 async def get_system_screenshot():
-    temp_dir = "data/temp"
-    os.makedirs(temp_dir, exist_ok=True)
-    screenshot_path = os.path.join(temp_dir, "live_screen.png")
     try:
-        screenshot = pyautogui.screenshot()
+        capture_timeout_s = max(0.1, float(os.getenv("AEGIS_SCREENSHOT_TIMEOUT_S", "5")))
+    except ValueError:
+        capture_timeout_s = 5.0
+
+    try:
+        # Keep the blocking desktop call off the async event loop and bound its
+        # wait. The response is built from this capture only; no shared path or
+        # prior frame can be mistaken for current evidence.
+        screenshot = await asyncio.wait_for(
+            asyncio.to_thread(pyautogui.screenshot),
+            timeout=capture_timeout_s,
+        )
         # Downscale slightly for web load performance
         screenshot.thumbnail((1280, 720))
-        screenshot.save(screenshot_path, "PNG")
+        buffer = io.BytesIO()
+        screenshot.save(buffer, "PNG")
+        captured_at_ns = time.time_ns()
     except Exception as capture_error:
         # Never serve a stale frame or a fabricated blank image as if it were
         # the current desktop.  Callers need an explicit, machine-readable
         # failure so vision and automation can stop safely.
+        if isinstance(capture_error, asyncio.TimeoutError):
+            detail = f"Screen capture timed out after {capture_timeout_s:.2f}s"
+        else:
+            detail = str(capture_error)
         return JSONResponse(
             status_code=503,
             content={
                 "status": "VISION_UNAVAILABLE",
                 "verified": False,
                 "error_code": "DESKTOP_SESSION_UNAVAILABLE",
-                "detail": str(capture_error),
+                "detail": detail,
             },
         )
-    return FileResponse(screenshot_path, media_type="image/png")
+    return Response(
+        content=buffer.getvalue(),
+        media_type="image/png",
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate",
+            "Pragma": "no-cache",
+            "X-Aegis-Capture-Source": "pyautogui.desktop",
+            "X-Aegis-Captured-At-Ns": str(captured_at_ns),
+        },
+    )
 
 # Audio Cache to deliver <5ms replay latency for frequent phrases
 _TTS_AUDIO_CACHE = {}
