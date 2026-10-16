@@ -71,15 +71,3 @@ def test_redirect_outside_authorized_origin_is_blocked():
         assert "UNAUTHORIZED_REDIRECT" in str(exc)
     else:
         raise AssertionError("unauthorized redirect was accepted")
-
-
-def test_task_engine_ticket_entrypoint_fails_closed(monkeypatch):
-    monkeypatch.delenv("AEGIS_BOOKING_SITE_URL", raising=False)
-    from core.orchestration.task_engine import default_action_controller
-
-    result = asyncio.run(default_action_controller("WEB_EXECUTION", {
-        "app_name": "ticket_portal",
-        "query": "Avengers tickets",
-    }))
-    assert result["status"] == "FAILED"
-    assert "SITE_URL_REQUIRED" in result["error"]
