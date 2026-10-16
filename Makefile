@@ -8,7 +8,9 @@ PYTHON_OFFLINE_TESTS := \
 	tests/test_phase4_5_vision_integrity.py \
 	tests/test_screen_endpoint_truthfulness.py \
 	tests/test_tts_style_controls.py \
-	tests/smoke/test_phase_s_realtime.py
+	tests/smoke/test_phase_s_realtime.py \
+	tests/test_shared_task_junction.py \
+	tests/test_browser_security_policy.py
 
 .PHONY: test test-python test-node build
 
