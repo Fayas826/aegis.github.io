@@ -195,13 +195,19 @@ class VerifiedDesktopTextTask:
         digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
         return f"Save text in {app_title} to {destination} (sha256={digest})"
 
-    def _cancelled(self, context: TaskContext) -> bool:
-        if context.cancelled or context.is_expired():
-            return True
+    def _termination_status(self, context: TaskContext) -> Optional[str]:
+        if context.cancelled:
+            return "CANCELLED"
         if self.junction:
             current = self.junction.get(context.task_id)
-            return bool(current and current.get("status") == "CANCEL_REQUESTED")
-        return False
+            if current and current.get("status") == "CANCEL_REQUESTED":
+                return "CANCELLED"
+        if context.is_expired():
+            return "TIMEOUT"
+        return None
+
+    def _cancelled(self, context: TaskContext) -> bool:
+        return self._termination_status(context) is not None
 
     async def _wait_for_file(self, path: Path, timeout: float, context: TaskContext) -> bool:
         deadline = self.clock() + timeout
@@ -271,7 +277,8 @@ class VerifiedDesktopTextTask:
             reason = "DESKTOP_SESSION_UNAVAILABLE: desktop controller is unavailable"
             return self._complete(DesktopTaskResult(task_context.task_id, "UNAVAILABLE", goal, reason, error=reason))
         if self._cancelled(task_context):
-            return self._complete(DesktopTaskResult(task_context.task_id, "CANCELLED", goal, "Task cancelled before execution."))
+            status = self._termination_status(task_context) or "CANCELLED"
+            return self._complete(DesktopTaskResult(task_context.task_id, status, goal, f"Task ended with {status.lower()} before execution."))
 
         target.parent.mkdir(parents=True, exist_ok=True)
         existed_before = target.exists()
@@ -302,7 +309,8 @@ class VerifiedDesktopTextTask:
             evidence["actions"].append({"action": "focus", "window": app_title, "hwnd": hwnd})
 
             if self._cancelled(task_context):
-                return self._complete(DesktopTaskResult(task_context.task_id, "CANCELLED", goal, "Task cancelled during execution.", evidence))
+                status = self._termination_status(task_context) or "CANCELLED"
+                return self._complete(DesktopTaskResult(task_context.task_id, status, goal, f"Task ended with {status.lower()} during execution.", evidence))
             input_adapter.hotkey("ctrl", "a")
             await self.sleep(0.2)
             input_adapter.press("backspace")
@@ -333,8 +341,9 @@ class VerifiedDesktopTextTask:
             evidence["actions"].append({"action": "type_and_save", "reported": True})
 
             if not await self._wait_for_file(target, timeout_seconds, task_context):
-                if self._cancelled(task_context):
-                    return self._complete(DesktopTaskResult(task_context.task_id, "CANCELLED", goal, "Task cancelled while waiting for save.", evidence))
+                termination = self._termination_status(task_context)
+                if termination:
+                    return self._complete(DesktopTaskResult(task_context.task_id, termination, goal, f"Task ended with {termination.lower()} while waiting for save.", evidence))
                 raise TimeoutError("TIMEOUT: saved file did not appear")
             actual = target.read_text(encoding="utf-8")
             actual_digest = hashlib.sha256(actual.encode("utf-8")).hexdigest()
@@ -371,6 +380,9 @@ class VerifiedDesktopTextTask:
         except FileNotFoundError as exc:
             reason = f"UNAVAILABLE: application could not be launched: {exc}"
             return self._complete(DesktopTaskResult(task_context.task_id, "UNAVAILABLE", goal, reason, evidence, reason))
+        except TimeoutError as exc:
+            status = self._termination_status(task_context) or "TIMEOUT"
+            return self._complete(DesktopTaskResult(task_context.task_id, status, goal, "Desktop execution timed out.", evidence, str(exc)))
         except Exception as exc:
             evidence.setdefault("after", _safe_observation(self.observer()))
             return self._complete(DesktopTaskResult(task_context.task_id, "FAILED", goal, "Desktop execution failed.", evidence, str(exc)))

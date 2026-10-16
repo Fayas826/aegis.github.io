@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from pathlib import Path
 from typing import Any
 
@@ -234,4 +235,23 @@ def test_cancelled_context_does_not_launch_application(tmp_path):
     )
 
     assert result.status == "CANCELLED"
+    assert processes == []
+
+
+def test_expired_context_is_timeout_not_cancellation(tmp_path):
+    context = TaskContext(goal="expired desktop task", deadline=time.time() - 1)
+    runner, target, processes = _task(tmp_path, FakeInput("content"))
+
+    result = asyncio.run(
+        runner.run(
+            app_command=["notepad.exe"],
+            app_title="Notepad",
+            content="content",
+            destination=target,
+            allowed_roots=[tmp_path],
+            context=context,
+        )
+    )
+
+    assert result.status == "TIMEOUT"
     assert processes == []
