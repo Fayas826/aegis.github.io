@@ -29,6 +29,22 @@ class FakeClient:
         self.models = FakeModels(responses)
 
 
+class FakeAction:
+    status = "SUCCESS"
+    detail = "launched"
+    error = None
+
+    def to_dict(self):
+        return {"status": self.status, "detail": self.detail}
+
+
+class FakeActions:
+    def launch(self, program, args=()):
+        self.program = program
+        self.args = list(args)
+        return FakeAction()
+
+
 def response_without_tool_call():
     return SimpleNamespace(candidates=[SimpleNamespace(content=SimpleNamespace(parts=[SimpleNamespace(text="done", function_call=None)]))])
 
@@ -41,8 +57,20 @@ def test_open_goal_verification_uses_observed_window():
 
 def test_worker_reports_unavailable_without_gemini_key():
     worker = UniversalGUIWorker(perception=FakePerception(), api_key_env="MISSING_AEGIS_KEY")
-    result = worker.run_task("open Notepad")
+    result = worker.run_task("type a short note in the active editor")
     assert result["status"] == "UNAVAILABLE"
+
+
+def test_simple_open_goal_works_without_model_when_fresh_window_matches():
+    actions = FakeActions()
+    worker = UniversalGUIWorker(
+        perception=FakePerception(window="Notepad"),
+        actions=actions,
+        api_key_env="MISSING_AEGIS_KEY",
+    )
+    result = worker.run_task("open Notepad")
+    assert result["status"] == "VERIFIED"
+    assert actions.program.lower().startswith("notepad")
 
 
 def test_worker_verifies_observable_open_goal_with_injected_client():

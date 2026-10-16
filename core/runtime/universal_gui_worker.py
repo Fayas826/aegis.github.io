@@ -15,6 +15,8 @@ from __future__ import annotations
 import base64
 import os
 import shlex
+import shutil
+import re
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Optional, Sequence
 
@@ -188,7 +190,55 @@ class UniversalGUIWorker:
             return result.to_dict()
         return {"status": "FAILED", "detail": "Action adapter returned an invalid result."}
 
+    def _direct_launch_goal(self, goal: str) -> Optional[dict[str, Any]]:
+        """Handle a low-risk app launch without requiring a vision model.
+
+        This keeps simple commands usable when Gemini is not configured while
+        still using the same observed launch adapter and postcondition check.
+        All other goals continue through the model-driven loop.
+        """
+
+        match = re.match(r"^\s*(?:open|launch|start)\s+(?:the\s+)?(.+?)\s*$", goal, re.I)
+        if not match:
+            return None
+        target = re.sub(r"\s+(?:app|application)$", "", match.group(1), flags=re.I).strip()
+        if not target or any(char in target for char in "\r\n\x00") or len(target) > 260:
+            return {"status": "BLOCKED", "verification_status": "BLOCKED", "error": "Invalid application target."}
+        program = target
+        args: list[str] = []
+        try:
+            from action.desktop_control.desktop_controller import desktop_controller
+
+            resolved = desktop_controller.resolve_application_path(target)
+            if resolved:
+                program = resolved
+        except Exception:
+            resolved = shutil.which(target)
+            if resolved:
+                program = resolved
+        action = self.actions.launch(program, args)
+        observation = self.perception.observe()
+        if action.status != "SUCCESS":
+            return {
+                "status": action.status,
+                "verification_status": "UNVERIFIED",
+                "error": action.error or action.detail,
+                "action": action.to_dict(),
+                "final_observation": observation.to_dict(),
+            }
+        verified = _verified_open_goal(goal, observation)
+        return {
+            "status": "VERIFIED" if verified else "UNVERIFIED",
+            "verification_status": "VERIFIED" if verified else "UNVERIFIED",
+            "detail": "Application launch verified by fresh active-window observation." if verified else "Application launched but active-window verification did not match.",
+            "action": action.to_dict(),
+            "final_observation": observation.to_dict(),
+        }
+
     def run_task(self, goal: str, status_callback: Optional[Callable[[str], None]] = None) -> dict[str, Any]:
+        direct = self._direct_launch_goal(goal)
+        if direct is not None:
+            return direct
         client = self._get_client()
         if client is None:
             return WorkerOutcome("UNAVAILABLE", "Gemini vision client is not configured or importable.").to_dict()
