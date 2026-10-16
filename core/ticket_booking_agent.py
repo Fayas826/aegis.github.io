@@ -973,7 +973,17 @@ class JarvisTicketBooker:
             sm.transition_to(BookingState.FAILED, "Browser unavailable")
             return {"status": "FAILED", "error": sm.ctx.error, "context": sm.ctx.model_dump()}
 
-        target_url = site_url or "http://127.0.0.1:8765/"
+        # Never silently route a real booking request to the deterministic
+        # local test portal. Production callers must provide an explicit
+        # authorized site URL or configure one intentionally.
+        target_url = site_url or os.getenv("AEGIS_BOOKING_SITE_URL", "").strip()
+        if not target_url:
+            sm.ctx.error = (
+                "SITE_URL_REQUIRED: No authorized booking site was supplied. "
+                "The local mock portal is test-only and is never selected automatically."
+            )
+            sm.transition_to(BookingState.FAILED, "No authorized booking site configured")
+            return {"status": "FAILED", "error": sm.ctx.error, "context": sm.ctx.model_dump()}
         sm.ctx.portal_url = target_url
 
         try:
@@ -1269,16 +1279,18 @@ class JarvisTicketBooker:
                 f"Please specify which movie you would like to book."
             )
 
-        # Detect target URL
+        # Detect target URL. An explicit BookMyShow command is allowed to use
+        # the configured real portal; otherwise fail closed instead of
+        # selecting the local deterministic mock.
         target_portal = site_url
         if not target_portal:
             if "127.0.0.1" in lower or "localhost" in lower:
                 m_url = re.search(r"http://[a-zA-Z0-9\.:]+", cmd)
-                target_portal = m_url.group(0) if m_url else "http://127.0.0.1:8765/"
+                target_portal = m_url.group(0) if m_url else None
             elif any(p in lower for p in ("mock", "test portal", "test site")):
                 target_portal = "http://127.0.0.1:8765/"
             elif "bookmyshow" in lower:
-                target_portal = "https://in.bookmyshow.com"
+                target_portal = os.getenv("AEGIS_BOOKING_SITE_URL", "https://in.bookmyshow.com").strip()
 
         # Execute verified booking state machine
         res = await self.execute_booking_flow(intent, site_url=target_portal)

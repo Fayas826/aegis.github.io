@@ -10,7 +10,8 @@ PYTHON_OFFLINE_TESTS := \
 	tests/test_tts_style_controls.py \
 	tests/smoke/test_phase_s_realtime.py \
 	tests/test_shared_task_junction.py \
-	tests/test_browser_security_policy.py
+	tests/test_browser_security_policy.py \
+	tests/test_booking_portal_policy.py
 
 .PHONY: test test-python test-node build
 
