@@ -15,7 +15,11 @@ PYTHON_OFFLINE_TESTS := \
 	tests/test_web_truthful_runtime.py \
 	tests/test_neural_extensions_integration.py \
 	tests/test_verified_desktop_task.py \
-	tests/test_autonomy_capability_contract.py
+	tests/test_autonomy_capability_contract.py \
+	tests/test_universal_desktop_layer.py \
+	tests/test_universal_gui_worker.py \
+	tests/test_multimodal_runtime.py \
+	tests/test_gemini_computer_use_agent.py
 
 .PHONY: test test-python test-node build
 

@@ -307,10 +307,21 @@ class MultimodalRuntimeAdapter:
         agent = self.browser_agent
         if agent is None:
             try:
-                from core.web.model_driven_web_agent import ModelDrivenWebAgent
-                agent = ModelDrivenWebAgent()
-                if self.browser_runtime is not None:
-                    agent.browser_runtime = self.browser_runtime
+                if os.getenv("AEGIS_BROWSER_AGENT", "").casefold() in {"gemini", "gemini-computer-use", "computer-use"}:
+                    from core.web.gemini_computer_use_agent import GeminiComputerUseBrowserAgent
+                    runtime = self.browser_runtime
+                    if runtime is None:
+                        from core.web.unified_browser_runtime import unified_browser_runtime
+                        runtime = unified_browser_runtime
+                    init = await runtime.initialize(headless=headless)
+                    if init.get("status") not in {"LAUNCHED", "CONNECTED", "REUSED"}:
+                        return RuntimeResult(OutcomeStatus.UNAVAILABLE.value, "browser", "Browser runtime could not initialize.", {"initialization": init}).to_dict()
+                    agent = GeminiComputerUseBrowserAgent(browser_runtime=runtime, max_steps=max_steps)
+                else:
+                    from core.web.model_driven_web_agent import ModelDrivenWebAgent
+                    agent = ModelDrivenWebAgent()
+                    if self.browser_runtime is not None:
+                        agent.browser_runtime = self.browser_runtime
                 self.browser_agent = agent
             except Exception as exc:
                 return RuntimeResult(OutcomeStatus.UNAVAILABLE.value, "browser", f"Browser agent unavailable: {exc}").to_dict()
@@ -343,11 +354,15 @@ class MultimodalRuntimeAdapter:
     async def execute_desktop_goal(self, goal: str) -> Dict[str, Any]:
         """Dispatch a universal GUI goal through the injected authorized worker."""
 
-        if self.desktop_worker is None:
-            return RuntimeResult(OutcomeStatus.UNAVAILABLE.value, "desktop", "No desktop worker is configured.").to_dict()
         if self._cancel_event.is_set():
-            return RuntimeResult(OutcomeStatus.UNVERIFIED.value, "desktop", "Desktop goal was cancelled.").to_dict()
+            return RuntimeResult(OutcomeStatus.UNAVAILABLE.value, "desktop", "Desktop goal was cancelled before dispatch.").to_dict()
+        if self.desktop_worker is None:
+            try:
+                from core.runtime.universal_gui_worker import UniversalGUIWorker
 
+                self.desktop_worker = UniversalGUIWorker()
+            except Exception as exc:
+                return RuntimeResult(OutcomeStatus.UNAVAILABLE.value, "desktop", f"Universal desktop worker unavailable: {exc}").to_dict()
         worker = self.desktop_worker
 
         def invoke() -> Any:
