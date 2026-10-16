@@ -13,7 +13,8 @@ PYTHON_OFFLINE_TESTS := \
 	tests/test_browser_security_policy.py \
 	tests/test_booking_portal_policy.py \
 	tests/test_web_truthful_runtime.py \
-	tests/test_neural_extensions_integration.py
+	tests/test_neural_extensions_integration.py \
+	tests/test_verified_desktop_task.py
 
 .PHONY: test test-python test-node build
 
