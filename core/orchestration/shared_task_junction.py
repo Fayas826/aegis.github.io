@@ -22,6 +22,10 @@ class SharedTaskJunction:
     """Persist and retrieve one shared context per task ID."""
 
     TABLE = "tasks"
+    TERMINAL_STATUSES = {
+        "SUCCESS", "VERIFIED", "FAILED", "BLOCKED", "UNAVAILABLE",
+        "TIMEOUT", "CANCELLED", "CONFIRMED",
+    }
 
     def __init__(self, store: Optional[AegisSQLiteStore] = None):
         self.store = store or sovereign_db
@@ -46,7 +50,9 @@ class SharedTaskJunction:
         """Create or resume a task document without overwriting a live task."""
         with self._lock:
             current = self._read(context.task_id)
-            if current and current.get("status") in {"RUNNING", "WAITING", "CANCEL_REQUESTED"}:
+            if current:
+                # A task ID is an idempotency key. A late retry must not erase
+                # a running or terminal execution history.
                 return current
             now = self._now()
             document = {
@@ -81,6 +87,17 @@ class SharedTaskJunction:
             document = self._read(task_id)
             if document is None:
                 return None
+            if document.get("status") in self.TERMINAL_STATUSES:
+                # Preserve the late event for diagnosis, but never allow it to
+                # mutate terminal status, result, or terminal evidence.
+                document.setdefault("events", []).append({
+                    "type": "late_event_ignored",
+                    "ignored_event_type": event_type,
+                    "reason": "task_already_terminal",
+                    "ts": self._now(),
+                })
+                return self._write(document)
+            cancellation_requested = document.get("status") == "CANCEL_REQUESTED"
             event = {"type": event_type, "ts": self._now(), **details}
             if agent:
                 event["agent"] = agent.lower()
@@ -93,7 +110,7 @@ class SharedTaskJunction:
             if context:
                 document.setdefault("context", {}).setdefault("parameters", {}).update(copy.deepcopy(context))
                 document.setdefault("parameters", {}).update(copy.deepcopy(context))
-            if status:
+            if status and not cancellation_requested:
                 document["status"] = status
             return self._write(document)
 
@@ -137,6 +154,22 @@ class SharedTaskJunction:
             document = self._read(task_id)
             if document is None:
                 return None
+            if document.get("status") in self.TERMINAL_STATUSES:
+                document.setdefault("events", []).append({
+                    "type": "late_terminal_result_ignored",
+                    "attempted_status": status,
+                    "reason": "task_already_terminal",
+                    "ts": self._now(),
+                })
+                return self._write(document)
+            if document.get("status") == "CANCEL_REQUESTED" and status != "CANCELLED":
+                document.setdefault("events", []).append({
+                    "type": "late_terminal_result_ignored",
+                    "attempted_status": status,
+                    "reason": "cancellation_requested",
+                    "ts": self._now(),
+                })
+                return self._write(document)
             document["status"] = status
             document["result"] = copy.deepcopy(result)
             if evidence:
@@ -148,6 +181,9 @@ class SharedTaskJunction:
 
     def cancel(self, task_id: str, reason: str = "operator") -> Optional[Dict[str, Any]]:
         """Request cooperative cancellation without pretending it is complete."""
+        current = self.get(task_id)
+        if current and current.get("status") in self.TERMINAL_STATUSES:
+            return current
         return self.record_event(task_id, "cancel_requested", status="CANCEL_REQUESTED", reason=reason)
 
 

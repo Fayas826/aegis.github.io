@@ -20,6 +20,41 @@ load_dotenv()
 
 logger = logging.getLogger("AEGIS.TicketAgent")
 
+MOCK_BOOKING_URL = "http://127.0.0.1:8765/"
+
+
+class BookingSiteAuthorizationError(ValueError):
+    """Raised when a booking flow leaves its explicitly authorized origin."""
+
+
+def booking_origin(url: str) -> Optional[tuple[str, str, int]]:
+    """Return a normalized HTTP(S) origin, rejecting ambiguous URLs."""
+    try:
+        parsed = urlparse((url or "").strip())
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            return None
+        if parsed.username or parsed.password or parsed.fragment:
+            return None
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        return parsed.scheme.lower(), parsed.hostname.lower().rstrip("."), port
+    except ValueError:
+        return None
+
+
+def validate_booking_site_url(url: Optional[str], *, allow_mock: bool = False) -> str:
+    """Validate an explicit booking destination without resolving aliases."""
+    candidate = (url or "").strip()
+    origin = booking_origin(candidate)
+    if origin is None:
+        raise BookingSiteAuthorizationError(
+            "INVALID_SITE_URL: Booking sites must be explicit HTTP(S) URLs with a host."
+        )
+    if origin == booking_origin(MOCK_BOOKING_URL) and not allow_mock:
+        raise BookingSiteAuthorizationError(
+            "MOCK_SITE_REQUIRES_EXPLICIT_TEST: The local mock portal is test-only."
+        )
+    return candidate
+
 # Windows Proactor EventLoop shutdown cleanup patch (eliminates 'Event loop is closed' on exit)
 if sys.platform == "win32":
     try:
@@ -48,6 +83,34 @@ class JarvisTicketBooker:
         self.page: Optional[Page] = None
         self.playwright = None
         self.task_id = f"BKG-{uuid.uuid4().hex[:8].upper()}"
+        self._authorized_origin: Optional[tuple[str, str, int]] = None
+
+    def _ensure_booking_task(self, sm: Any) -> None:
+        """Create the booking task projection in the canonical junction."""
+        try:
+            from core.orchestration.agent_contract import ExecutionEnvironment, TaskContext
+            from core.orchestration.shared_task_junction import task_junction
+            intent = getattr(sm.ctx, "intent", None)
+            goal = getattr(intent, "raw_query", None) or f"Book {getattr(intent, 'movie_name', 'ticket')}"
+            task_junction.start(
+                TaskContext(
+                    task_id=sm.ctx.task_id,
+                    goal=goal,
+                    environment=ExecutionEnvironment.BROWSER,
+                ),
+                "ticket_booking",
+                {"portal_url": sm.ctx.portal_url},
+            )
+        except Exception as ex:
+            logger.warning(f"[TICKET_AGENT] Shared task junction unavailable: {ex}")
+
+    def _complete_booking_task(self, sm: Any, status: str, result: Any = None,
+                               evidence: Optional[Dict[str, Any]] = None) -> None:
+        try:
+            from core.orchestration.shared_task_junction import task_junction
+            task_junction.complete(sm.ctx.task_id, status, result, evidence=evidence)
+        except Exception as ex:
+            logger.warning(f"[TICKET_AGENT] Failed to persist terminal booking state: {ex}")
 
     async def start(self):
         # Reset stale handle if event loop changed
@@ -98,6 +161,36 @@ class JarvisTicketBooker:
             logger.warning(f"[TICKET_AGENT] Failed to bring browser to foreground: {e}")
             return {"status": "ERROR", "error": str(e)}
 
+    def _resolve_authorized_site(self, site_url: Optional[str] = None) -> str:
+        """Resolve only an explicit URL or intentional environment setting."""
+        candidate = site_url if site_url is not None else os.getenv("AEGIS_BOOKING_SITE_URL", "")
+        if not candidate or not candidate.strip():
+            raise BookingSiteAuthorizationError(
+                "SITE_URL_REQUIRED: No authorized booking site was supplied. "
+                "The local mock portal is test-only and is never selected automatically."
+            )
+        allow_mock = site_url is not None and candidate.strip() == MOCK_BOOKING_URL
+        target = validate_booking_site_url(candidate, allow_mock=allow_mock)
+        self._authorized_origin = booking_origin(target)
+        return target
+
+    def _assert_authorized_navigation(self, url: Optional[str] = None) -> str:
+        """Fail closed if a provider redirect leaves the authorized origin."""
+        current = (url or (self.page.url if self.page else "")).strip()
+        current_origin = booking_origin(current)
+        if not current_origin or current_origin != self._authorized_origin:
+            raise BookingSiteAuthorizationError(
+                "UNAUTHORIZED_REDIRECT: Browser navigation left the explicitly authorized booking origin."
+            )
+        return current
+
+    async def _navigate_authorized(self, target_url: str, timeout: int = 35000) -> str:
+        if not self.page:
+            raise BookingSiteAuthorizationError("BROWSER_UNAVAILABLE: No booking page is active.")
+        await self.page.goto(target_url, wait_until="domcontentloaded", timeout=timeout)
+        await self.page.wait_for_timeout(1000)
+        return self._assert_authorized_navigation()
+
     async def emit_progress(
         self,
         stage: str,
@@ -139,6 +232,18 @@ class JarvisTicketBooker:
                 "timestamp": time.time()
             }
             enterprise_event_bus.publish("browser.execution.progress", payload, source_squad="ticketing")
+            if sm:
+                self._ensure_booking_task(sm)
+                from core.orchestration.shared_task_junction import task_junction
+                progress_status = "WAITING" if is_pending_confirmation else ("FAILED" if stage == "FAILED" else "RUNNING")
+                task_junction.record_event(
+                    payload["task_id"],
+                    "browser_progress",
+                    agent="ticket_booking",
+                    status=progress_status,
+                    evidence=payload,
+                    stage=stage,
+                )
             return payload
         except Exception as ex:
             logger.warning(f"[TICKET_AGENT] Progress emission exception: {ex}")
@@ -372,20 +477,24 @@ class JarvisTicketBooker:
     # ─────────────────────────────────────────────────────────
     # 1. MOVIE TICKET BOOKING (BookMyShow Full Pipeline)
     # ─────────────────────────────────────────────────────────
-    async def book_movie_tickets(self, city: str, movie_name: str, seats: int = 2) -> Dict[str, Any]:
+    async def book_movie_tickets(self, city: str, movie_name: str, seats: int = 2,
+                                 site_url: Optional[str] = None) -> Dict[str, Any]:
         """
         Executes end-to-end autonomous movie booking:
         Navigates -> Self-corrects city modal -> Finds movie -> Selects showtime ->
         Autofills contact info -> Pauses at Human-in-the-Loop Safe Payment Gate.
         """
+        target_url = self._resolve_authorized_site(site_url)
         await self.start()
         city_clean = city.strip().capitalize()
-        url = f"https://in.bookmyshow.com/explore/movies-{city_clean.lower()}"
-        print(f"[BOOKMYSHOW] Navigating to {url}...")
+        parsed = urlparse(target_url)
+        url = target_url if parsed.path.rstrip("/") else f"{target_url.rstrip('/')}/explore/movies-{city_clean.lower()}"
+        print(f"[BOOKING] Navigating to {url}...")
         
         try:
-            await self.page.goto(url, wait_until="domcontentloaded", timeout=35000)
-            await self.page.wait_for_timeout(2000)
+            await self._navigate_authorized(url)
+            await self.page.wait_for_timeout(1000)
+            self._assert_authorized_navigation()
 
             # Self-correct city modal if prompted
             await self.handle_interruptions(city_clean)
@@ -560,6 +669,7 @@ class JarvisTicketBooker:
                     # Now we are at checkout. Inject Vault Contact Details!
                     await self.autofill_active_form()
             
+            self._assert_authorized_navigation()
             auth_msg = (
                 f"Sir, I have navigated to the graphical seat layout for '{movie_name}' in {city_clean}.\n"
                 f"Your contact details are ready in the vault for checkout.\n"
@@ -679,16 +789,7 @@ class JarvisTicketBooker:
         """
         await self.start()
         
-        city_slug = self.format_city_slug(city)
-        PORTALS = {
-            "bookmyshow": "https://in.bookmyshow.com",
-            "fandango": f"https://www.fandango.com/search?q={event_name}",
-            "amc": f"https://www.amctheatres.com/movies/{event_name.lower().replace(' ', '-')}",
-            "ticketmaster": f"https://www.ticketmaster.com/search?q={event_name}",
-            "eventbrite": f"https://www.eventbrite.com/d/{city_slug}/{event_name.lower()}/",
-        }
-        
-        target_url = PORTALS.get(site_or_url.lower()) or (site_or_url if site_or_url.startswith("http") else "https://in.bookmyshow.com")
+        target_url = self._resolve_authorized_site(site_or_url)
         print(f"[MACRO_PLANNER] Starting Universal Web Agent for '{event_name}' at {target_url}...")
         
         from core.perception.multimodal_vision_agent import MultimodalVisionAgent
@@ -704,8 +805,8 @@ class JarvisTicketBooker:
         dynamic_goals = await dynamic_web_planner.generate_initial_plan(objective)
         
         try:
-            await self.page.goto(target_url, wait_until="domcontentloaded", timeout=35000)
-            await self.page.wait_for_timeout(2500)
+            await self._navigate_authorized(target_url)
+            await self.page.wait_for_timeout(1500)
             self.bring_to_foreground()
 
             # Execute Dynamic Plan
@@ -763,6 +864,7 @@ class JarvisTicketBooker:
             )
             print(f"[PAYMENT_GATE] {auth_msg}")
 
+            self._assert_authorized_navigation()
             return {
                 "status": "HUMAN_AUTHORIZATION_REQUIRED",
                 "stage": "PAYMENT_GATE",
@@ -778,31 +880,27 @@ class JarvisTicketBooker:
     # ─────────────────────────────────────────────────────────
     # STEP-BY-STEP CONVERSATIONAL METHODS (MODE 2)
     # ─────────────────────────────────────────────────────────
-    async def open_portal(self, site_or_url: str = "bookmyshow") -> str:
+    async def open_portal(self, site_or_url: Optional[str] = None) -> str:
         """Step 1 in interactive mode: Opens the portal and confirms readiness."""
+        target_url = self._resolve_authorized_site(site_or_url)
         await self.start()
-        PORTALS = {
-            "bookmyshow": "https://in.bookmyshow.com",
-            "fandango": "https://www.fandango.com",
-            "amc": "https://www.amctheatres.com",
-            "ticketmaster": "https://www.ticketmaster.com",
-            "eventbrite": "https://www.eventbrite.com",
-        }
-        target_url = PORTALS.get(site_or_url.lower()) or (site_or_url if site_or_url.startswith("http") else "https://in.bookmyshow.com")
         print(f"[STEP_BOOKER] Step 1: Navigating to {target_url}...")
-        await self.page.goto(target_url, wait_until="domcontentloaded", timeout=35000)
-        await self.page.wait_for_timeout(2000)
+        await self._navigate_authorized(target_url)
+        await self.page.wait_for_timeout(1000)
         await self.handle_interruptions("Kollam")
         self.bring_to_foreground()
-        portal_name = site_or_url.capitalize()
+        portal_name = urlparse(target_url).hostname or "authorized booking site"
         return f"We are on {portal_name}, Sir. Which city or movie would you like me to set?"
 
     async def search_movie_step(self, movie: str, city: str = "Kollam") -> str:
         """Step 2 in interactive mode: Selects city, searches movie, and opens showtimes."""
         if not self.page:
+            target_url = self._resolve_authorized_site()
             await self.start()
-            await self.page.goto("https://in.bookmyshow.com", wait_until="domcontentloaded", timeout=35000)
-            await self.page.wait_for_timeout(2000)
+            await self._navigate_authorized(target_url)
+            await self.page.wait_for_timeout(1000)
+
+        self._assert_authorized_navigation()
 
         city_clean = city.strip().capitalize()
         print(f"[STEP_BOOKER] Step 2: Setting city '{city_clean}' and searching '{movie}'...")
@@ -958,33 +1056,31 @@ class JarvisTicketBooker:
 
         ctx = BookingContext(intent=intent)
         sm = BookingStateMachine(ctx)
+        self._ensure_booking_task(sm)
 
         # 1. INTENT VALIDATION
         if not sm.transition_to(BookingState.INTENT_VALIDATION, "Validating structured intent"):
+            self._complete_booking_task(sm, "FAILED", evidence={"error": sm.ctx.error})
             return {"status": "FAILED", "error": sm.ctx.error, "context": sm.ctx.model_dump()}
 
         if not intent.movie_name:
             sm.ctx.error = "MISSING_MOVIE_NAME: Required movie title was not specified."
             sm.transition_to(BookingState.FAILED, "Missing required movie title")
+            self._complete_booking_task(sm, "FAILED", evidence={"error": sm.ctx.error})
             return {"status": "FAILED", "error": sm.ctx.error, "context": sm.ctx.model_dump()}
 
         # Never silently route a real booking request to the deterministic
         # local test portal. Production callers must provide an explicit
         # authorized site URL or configure one intentionally.
-        target_url = site_url or os.getenv("AEGIS_BOOKING_SITE_URL", "").strip()
-        if not target_url:
+        try:
+            target_url = self._resolve_authorized_site(site_url)
+        except BookingSiteAuthorizationError as ex:
             sm.ctx.error = (
-                "SITE_URL_REQUIRED: No authorized booking site was supplied. "
-                "The local mock portal is test-only and is never selected automatically."
+                str(ex) if str(ex).startswith(("SITE_URL_REQUIRED", "INVALID_SITE_URL", "MOCK_SITE_REQUIRES_EXPLICIT_TEST"))
+                else f"INVALID_SITE_URL: {ex}"
             )
-            sm.transition_to(BookingState.FAILED, "No authorized booking site configured")
-            return {"status": "FAILED", "error": sm.ctx.error, "context": sm.ctx.model_dump()}
-        parsed_url = urlparse(target_url)
-        if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
-            sm.ctx.error = (
-                "INVALID_SITE_URL: Booking sites must be explicit HTTP(S) URLs with a host."
-            )
-            sm.transition_to(BookingState.FAILED, "Invalid booking site URL")
+            sm.transition_to(BookingState.FAILED, "Booking site authorization failed")
+            self._complete_booking_task(sm, "FAILED", evidence={"error": sm.ctx.error})
             return {"status": "FAILED", "error": sm.ctx.error, "context": sm.ctx.model_dump()}
         sm.ctx.portal_url = target_url
 
@@ -992,13 +1088,14 @@ class JarvisTicketBooker:
         if not self.page:
             sm.ctx.error = "BROWSER_UNAVAILABLE: Failed to launch or attach Playwright page."
             sm.transition_to(BookingState.FAILED, "Browser unavailable")
+            self._complete_booking_task(sm, "UNAVAILABLE", evidence={"error": sm.ctx.error})
             return {"status": "FAILED", "error": sm.ctx.error, "context": sm.ctx.model_dump()}
 
         try:
             # 2. SEARCHING
             sm.transition_to(BookingState.SEARCHING, f"Navigating to {target_url} and searching for '{intent.movie_name}'")
-            await self.page.goto(target_url, wait_until="domcontentloaded", timeout=35000)
-            await self.page.wait_for_timeout(1000)
+            await self._navigate_authorized(target_url)
+            self._assert_authorized_navigation()
             await self.handle_interruptions(intent.city or "Kochi")
             self.bring_to_foreground()
 
@@ -1026,6 +1123,7 @@ class JarvisTicketBooker:
                 else:
                     await self.page.keyboard.press("Enter")
                 await self.page.wait_for_timeout(1000)
+            self._assert_authorized_navigation()
 
             await self.emit_progress(
                 stage="SEARCHING",
@@ -1088,6 +1186,7 @@ class JarvisTicketBooker:
             else:
                 await matching_card.click()
             await self.page.wait_for_timeout(1500)
+            self._assert_authorized_navigation()
 
             # Date Selection
             if intent.date:
@@ -1095,10 +1194,24 @@ class JarvisTicketBooker:
                 date_btn = await self.page.query_selector(f"#date-{date_target}, button:has-text('{intent.date.capitalize()}')")
                 if date_btn and await date_btn.is_visible():
                     await date_btn.click()
-                    sm.ctx.selected_date = intent.date
                     await self.page.wait_for_timeout(500)
-            if not sm.ctx.selected_date:
-                sm.ctx.selected_date = "tomorrow"
+                    self._assert_authorized_navigation()
+                    selected = await self.page.query_selector(f"#date-{date_target}.selected")
+                    if selected:
+                        sm.ctx.selected_date = intent.date
+                if not sm.ctx.selected_date:
+                    sm.ctx.error = "DATE_NOT_VERIFIED: Requested date was not selected by the provider."
+                    sm.transition_to(BookingState.FAILED, "Date selection could not be verified")
+                    return {"status": "FAILED", "error": sm.ctx.error, "context": sm.ctx.model_dump()}
+            else:
+                selected_date = await self.page.query_selector("button[id^='date-'].selected")
+                if selected_date:
+                    date_id = await selected_date.get_attribute("id") or ""
+                    sm.ctx.selected_date = date_id.removeprefix("date-") or (await selected_date.inner_text()).strip()
+                if not sm.ctx.selected_date:
+                    sm.ctx.error = "DATE_NOT_VERIFIED: Provider did not expose a selected date."
+                    sm.transition_to(BookingState.FAILED, "Date selection could not be verified")
+                    return {"status": "FAILED", "error": sm.ctx.error, "context": sm.ctx.model_dump()}
 
             # Showtime Selection
             target_time = intent.time_preference
@@ -1113,14 +1226,18 @@ class JarvisTicketBooker:
                 sm.ctx.selected_showtime = time_val.strip()
                 await st_btn.click()
                 await self.page.wait_for_timeout(500)
+                self._assert_authorized_navigation()
             else:
-                sm.ctx.selected_showtime = "09:15 PM"
+                sm.ctx.error = "SHOWTIME_NOT_VERIFIED: No authorized showtime control was available."
+                sm.transition_to(BookingState.FAILED, "Showtime could not be verified")
+                return {"status": "FAILED", "error": sm.ctx.error, "context": sm.ctx.model_dump()}
 
             # Open Seat Map
             proceed_seats = await self.page.query_selector("#proceed-seats-btn, button:has-text('Select Seats')")
             if proceed_seats and await proceed_seats.is_visible():
                 await proceed_seats.click()
                 await self.page.wait_for_timeout(1000)
+                self._assert_authorized_navigation()
 
             # Pick Seats
             req_seats = intent.ticket_count or 1
@@ -1133,12 +1250,19 @@ class JarvisTicketBooker:
                 await self.page.wait_for_timeout(300)
 
             sm.ctx.selected_seats = chosen_seats
+            if len(chosen_seats) != req_seats:
+                sm.ctx.error = (
+                    f"SEATS_NOT_VERIFIED: Requested {req_seats} seats but selected {len(chosen_seats)}."
+                )
+                sm.transition_to(BookingState.FAILED, "Seat selection could not be verified")
+                return {"status": "FAILED", "error": sm.ctx.error, "context": sm.ctx.model_dump()}
 
             # Proceed to Checkout
             checkout_btn = await self.page.query_selector("#proceed-checkout-btn, button:has-text('Review & Checkout'), button:has-text('Proceed to Checkout')")
             if checkout_btn and await checkout_btn.is_visible():
                 await checkout_btn.click()
                 await self.page.wait_for_timeout(1000)
+                self._assert_authorized_navigation()
 
             await self.emit_progress(
                 stage="SELECTION",
@@ -1153,13 +1277,17 @@ class JarvisTicketBooker:
             if price_el:
                 sm.ctx.total_price = (await price_el.inner_text()).strip()
             else:
-                sm.ctx.total_price = f"₹{req_seats * 250}.00"
+                sm.ctx.error = "PRICE_NOT_VERIFIED: Provider did not render a total price."
+                sm.transition_to(BookingState.FAILED, "Price could not be verified")
+                return {"status": "FAILED", "error": sm.ctx.error, "context": sm.ctx.model_dump()}
 
             venue_el = await self.page.query_selector("#summary-venue, #venue-label")
             if venue_el:
                 sm.ctx.selected_venue = (await venue_el.inner_text()).strip()
             else:
-                sm.ctx.selected_venue = "JB Cinemas Screen 1"
+                sm.ctx.error = "VENUE_NOT_VERIFIED: Provider did not render a venue."
+                sm.transition_to(BookingState.FAILED, "Venue could not be verified")
+                return {"status": "FAILED", "error": sm.ctx.error, "context": sm.ctx.model_dump()}
 
             await self.emit_progress(
                 stage="DETAILS_VERIFICATION",
@@ -1219,13 +1347,27 @@ class JarvisTicketBooker:
         from core.booking.booking_state_machine import BookingState
         sm = state_machine
         if not sm.authorize():
+            self._complete_booking_task(sm, "FAILED", evidence={"error": sm.ctx.error or "Authorization rejected"})
             return {"status": "FAILED", "error": sm.ctx.error or "Authorization rejected.", "context": sm.ctx.model_dump()}
+
+        try:
+            self._assert_authorized_navigation()
+        except BookingSiteAuthorizationError as ex:
+            sm.ctx.error = str(ex)
+            sm.transition_to(BookingState.FAILED, "Authorization page is outside the approved origin")
+            self._complete_booking_task(sm, "BLOCKED", evidence={"error": sm.ctx.error})
+            return {"status": "FAILED", "error": sm.ctx.error, "context": sm.ctx.model_dump()}
 
         sm.transition_to(BookingState.SUBMITTING, "Submitting final booking to ticketing provider")
         submit_btn = await self.page.query_selector("#authorize-booking-btn, button:has-text('Authorize & Confirm Booking'), button:has-text('Confirm Booking')")
-        if submit_btn and await submit_btn.is_visible():
-            await submit_btn.click()
-            await self.page.wait_for_timeout(1500)
+        if not submit_btn or not await submit_btn.is_visible():
+            sm.ctx.error = "CONFIRMATION_CONTROL_UNAVAILABLE: Provider confirmation control was not found."
+            sm.transition_to(BookingState.FAILED, "Confirmation control unavailable")
+            self._complete_booking_task(sm, "FAILED", evidence={"error": sm.ctx.error})
+            return {"status": "FAILED", "error": sm.ctx.error, "context": sm.ctx.model_dump()}
+        await submit_btn.click()
+        await self.page.wait_for_timeout(1500)
+        self._assert_authorized_navigation()
 
         # Read confirmed reference ID
         ref_el = await self.page.query_selector("#booking-reference-id, #booking-id, strong:has-text('BKG-')")
@@ -1233,10 +1375,21 @@ class JarvisTicketBooker:
         if ref_el:
             booking_ref = (await ref_el.inner_text()).strip()
         else:
-            booking_ref = f"BKG-CONFIRMED-{sm.ctx.task_id}"
+            sm.ctx.error = (
+                "UNVERIFIED_CONFIRMATION: Provider did not render a booking reference after submission."
+            )
+            sm.transition_to(BookingState.FAILED, "Booking confirmation could not be independently verified")
+            self._complete_booking_task(sm, "FAILED", evidence={"error": sm.ctx.error})
+            return {"status": "FAILED", "error": sm.ctx.error, "context": sm.ctx.model_dump()}
 
         sm.ctx.booking_reference = booking_ref
         sm.transition_to(BookingState.CONFIRMED, f"Booking verified with reference {booking_ref}")
+        self._complete_booking_task(
+            sm,
+            "CONFIRMED",
+            result={"booking_reference": booking_ref},
+            evidence={"url": self.page.url, "booking_reference": booking_ref},
+        )
 
         return {
             "status": "CONFIRMED",
@@ -1296,9 +1449,11 @@ class JarvisTicketBooker:
                 m_url = re.search(r"http://[a-zA-Z0-9\.:]+", cmd)
                 target_portal = m_url.group(0) if m_url else None
             elif any(p in lower for p in ("mock", "test portal", "test site")):
-                target_portal = "http://127.0.0.1:8765/"
+                target_portal = MOCK_BOOKING_URL
             elif "bookmyshow" in lower:
-                target_portal = os.getenv("AEGIS_BOOKING_SITE_URL", "https://in.bookmyshow.com").strip()
+                # A named provider is not authorization. The caller must pass
+                # an explicit URL or configure AEGIS_BOOKING_SITE_URL.
+                target_portal = os.getenv("AEGIS_BOOKING_SITE_URL", "").strip() or None
 
         # Execute verified booking state machine
         res = await self.execute_booking_flow(intent, site_url=target_portal)

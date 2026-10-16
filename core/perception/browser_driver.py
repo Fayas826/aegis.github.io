@@ -61,6 +61,7 @@ class PlaywrightBrowserDriver:
         self.is_cancelled: bool = False
         self.last_action: str = "INITIALIZED"
         self.last_outcome: str = "IDLE"
+        self.last_observation: Dict[str, Any] = {}
         self.window_state: Dict[str, Any] = {
             "WINDOW_CREATED": False,
             "WINDOW_VISIBLE": False,
@@ -448,6 +449,7 @@ class PlaywrightBrowserDriver:
             await page.wait_for_timeout(1000)
 
             state = await self.observe_page_state()
+            self.last_observation = state
             if state.get("security_challenge"):
                 self.last_action = f"NAVIGATE to {url}"
                 self.last_outcome = f"BLOCKED: security challenge ({state['security_challenge']})"
@@ -458,7 +460,7 @@ class PlaywrightBrowserDriver:
                 self.force_foreground()
 
             self.last_action = f"NAVIGATE to {url}"
-            self.last_outcome = "SUCCESS"
+            self.last_outcome = "UNVERIFIED: navigation completed; goal state was not supplied"
             return True
         except Exception as e:
             logger.error(f"[BROWSER] Navigation failed to '{url}': {e}")
@@ -577,15 +579,22 @@ class PlaywrightBrowserDriver:
 
     async def click_element(self, selector: str, timeout: int = 10000) -> bool:
         """Clicks an element by CSS, text, or XPath selector."""
+        await self.wait_if_paused()
         page = self.get_page()
         if not page:
             return False
         try:
+            before = await self.observe_page_state()
             loc = page.locator(selector).first
             await loc.wait_for(state="visible", timeout=timeout)
             await loc.click()
             await page.wait_for_timeout(500)
             state = await self.observe_page_state()
+            self.last_observation = {
+                "before": before,
+                "after": state,
+                "verification": self.verify_page_state(before, state),
+            }
             if state.get("security_challenge"):
                 self.last_outcome = f"BLOCKED: security challenge ({state['security_challenge']})"
                 return False
@@ -597,15 +606,22 @@ class PlaywrightBrowserDriver:
 
     async def fill_element(self, selector: str, text: str, timeout: int = 10000) -> bool:
         """Fills an input field by selector."""
+        await self.wait_if_paused()
         page = self.get_page()
         if not page:
             return False
         try:
+            before = await self.observe_page_state()
             loc = page.locator(selector).first
             await loc.wait_for(state="visible", timeout=timeout)
             await loc.fill(text)
             await page.wait_for_timeout(300)
             state = await self.observe_page_state()
+            self.last_observation = {
+                "before": before,
+                "after": state,
+                "verification": self.verify_page_state(before, state),
+            }
             if state.get("security_challenge"):
                 self.last_outcome = f"BLOCKED: security challenge ({state['security_challenge']})"
                 return False
@@ -617,10 +633,12 @@ class PlaywrightBrowserDriver:
 
     async def click_semantic(self, text: Optional[str] = None, role: Optional[str] = None, timeout: int = 10000) -> bool:
         """Clicks an element using semantic Playwright locators (role, accessible text)."""
+        await self.wait_if_paused()
         page = self.get_page()
         if not page:
             return False
         try:
+            before = await self.observe_page_state()
             if role and text:
                 loc = page.get_by_role(role, name=text, exact=False).first
             elif role:
@@ -634,6 +652,11 @@ class PlaywrightBrowserDriver:
             await loc.click()
             await page.wait_for_timeout(500)
             state = await self.observe_page_state()
+            self.last_observation = {
+                "before": before,
+                "after": state,
+                "verification": self.verify_page_state(before, state),
+            }
             if state.get("security_challenge"):
                 self.last_outcome = f"BLOCKED: security challenge ({state['security_challenge']})"
                 return False
@@ -645,10 +668,12 @@ class PlaywrightBrowserDriver:
 
     async def fill_semantic(self, placeholder: Optional[str] = None, text: str = "", label: Optional[str] = None, timeout: int = 10000) -> bool:
         """Fills an input field using placeholder or label semantic locators."""
+        await self.wait_if_paused()
         page = self.get_page()
         if not page:
             return False
         try:
+            before = await self.observe_page_state()
             if placeholder:
                 loc = page.get_by_placeholder(placeholder, exact=False).first
             elif label:
@@ -660,6 +685,11 @@ class PlaywrightBrowserDriver:
             await loc.fill(text)
             await page.wait_for_timeout(300)
             state = await self.observe_page_state()
+            self.last_observation = {
+                "before": before,
+                "after": state,
+                "verification": self.verify_page_state(before, state),
+            }
             if state.get("security_challenge"):
                 self.last_outcome = f"BLOCKED: security challenge ({state['security_challenge']})"
                 return False

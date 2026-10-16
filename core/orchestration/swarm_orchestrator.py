@@ -176,6 +176,25 @@ class SwarmOrchestrator:
                 self._record_terminal(payload)
                 return payload
 
+            if task_ctx.is_expired():
+                err = StructuredError(
+                    error_code=ErrorCode.TIMEOUT.value,
+                    message="Task deadline expired before the next agent step.",
+                    details={"trace": execution_trace},
+                    recoverable=True,
+                )
+                payload = {
+                    "task_id": task_ctx.task_id,
+                    "correlation_id": task_ctx.correlation_id,
+                    "status": "TIMEOUT",
+                    "error": err.to_dict(),
+                    "reason": err.message,
+                    "trace": execution_trace,
+                    "duration_ms": (time.time() - start_time) * 1000,
+                }
+                self._record_terminal(payload)
+                return payload
+
             agent = self.registry.get(current_agent_name)
             agent_state = self.agent_states.get(current_agent_name, AgentLifecycleState.FAILED)
 
@@ -300,11 +319,20 @@ class SwarmOrchestrator:
                 error_info = None
                 if isinstance(result, dict):
                     status_str = str(result.get("status", "")).upper()
-                    if status_str in ("FAILED", "ERROR", "REJECTED", "BLOCKED"):
+                    accepted_statuses = {"SUCCESS", "VERIFIED", "CONFIRMED"}
+                    failure_statuses = {
+                        "FAILED", "ERROR", "REJECTED", "BLOCKED", "UNAVAILABLE",
+                        "UNVERIFIED", "TIMEOUT", "CANCELLED", "WAITING",
+                        "PENDING_CONFIRMATION", "HUMAN_AUTHORIZATION_REQUIRED",
+                    }
+                    if status_str in failure_statuses:
                         is_failed = True
                         error_info = result.get("error") or result.get("reason") or "Underlying agent reported failure."
-                    elif status_str == "SUCCESS":
+                    elif status_str in accepted_statuses:
                         is_failed = False
+                    elif status_str:
+                        is_failed = True
+                        error_info = result.get("error") or result.get("reason") or f"Unsupported execution status: {status_str}"
                     elif result.get("success") is False:
                         is_failed = True
                         error_info = result.get("error") or "Operation unsuccessful."
@@ -324,8 +352,9 @@ class SwarmOrchestrator:
                 )
 
                 if is_failed:
+                    verification_failed = isinstance(result, dict) and str(result.get("status", "")).upper() == "UNVERIFIED"
                     err = StructuredError(
-                        error_code=ErrorCode.EXECUTION_FAILED.value,
+                        error_code=(ErrorCode.VERIFICATION_FAILED.value if verification_failed else ErrorCode.EXECUTION_FAILED.value),
                         message=str(error_info),
                         details={"agent_result": result},
                         recoverable=True,

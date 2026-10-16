@@ -83,3 +83,47 @@ def test_swarm_cancellation_is_durable_and_not_reported_as_success(tmp_path):
     result = asyncio.run(run())
     assert result["status"] == "CANCELLED"
     assert junction.get(result["task_id"])["status"] == "CANCELLED"
+
+
+def test_terminal_task_ignores_late_events_results_and_cancellation(tmp_path):
+    junction = SharedTaskJunction(AegisSQLiteStore(str(tmp_path / "terminal.db")))
+    context = TaskContext(goal="terminal", task_id="terminal-task")
+    junction.start(context, "agent")
+    junction.complete("terminal-task", "SUCCESS", {"answer": 1})
+
+    junction.record_event("terminal-task", "late_result", status="FAILED", evidence={"late": True})
+    junction.complete("terminal-task", "FAILED", {"answer": 2})
+    junction.cancel("terminal-task", "late operator cancel")
+
+    saved = junction.get("terminal-task")
+    assert saved["status"] == "SUCCESS"
+    assert saved["result"] == {"answer": 1}
+    assert any(event["type"] == "late_event_ignored" for event in saved["events"])
+    assert any(event["type"] == "late_terminal_result_ignored" for event in saved["events"])
+
+
+def test_cancellation_request_wins_over_late_completion(tmp_path):
+    junction = SharedTaskJunction(AegisSQLiteStore(str(tmp_path / "cancel_race.db")))
+    junction.start(TaskContext(goal="cancel race", task_id="cancel-race"), "agent")
+    junction.cancel("cancel-race", "operator")
+    junction.complete("cancel-race", "SUCCESS", {"late": True})
+
+    saved = junction.get("cancel-race")
+    assert saved["status"] == "CANCEL_REQUESTED"
+    assert saved["result"] is None
+
+
+def test_swarm_does_not_promote_unverified_agent_result_to_success(tmp_path):
+    junction = SharedTaskJunction(AegisSQLiteStore(str(tmp_path / "unverified.db")))
+    orchestrator = SwarmOrchestrator(junction=junction)
+
+    class UnverifiedAgent:
+        async def execute_task(self, goal, context=None):
+            return {"status": "UNVERIFIED", "reason": "no fresh evidence"}
+
+    orchestrator.register_agent("unverified", UnverifiedAgent())
+    result = asyncio.run(orchestrator.execute_swarm_task("unverified", "perform action"))
+
+    assert result["status"] == "FAILED"
+    assert result["error"]["error_code"] == "VERIFICATION_FAILED"
+    assert junction.get(result["task_id"])["status"] == "FAILED"

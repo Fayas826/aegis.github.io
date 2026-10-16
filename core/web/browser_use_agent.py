@@ -9,7 +9,6 @@ Replaces legacy Playwright DOM scraping with autonomous VLM-driven web execution
 """
 
 import os
-import asyncio
 import logging
 from typing import Dict, Any, Optional
 
@@ -86,7 +85,6 @@ class AegisBrowserUseEngine:
             llm = self._get_llm()
             if not llm:
                 logger.warning("[BROWSER-USE] LangChain LLM wrapper not found, falling back to CDP AXTree direct execution.")
-                from core.web.cdp_axtree_engine import cdp_axtree_engine
                 from core.web_agent import aegis_web_agent
                 await aegis_web_agent.initialize(headless=headless)
                 return await aegis_web_agent.execute_with_axtree(task)
@@ -109,11 +107,19 @@ class AegisBrowserUseEngine:
                 "engine": "browser-use"
             }
 
-        except Exception as e:
-            logger.error(f"[BROWSER-USE] Execution encountered exception: {e}. Falling back to AXTree engine.")
-            from core.web.cdp_axtree_engine import cdp_axtree_engine
+        except ImportError as e:
+            logger.warning(f"[BROWSER-USE] Browser-Use dependency unavailable: {e}. Falling back to AXTree engine.")
             from core.web_agent import aegis_web_agent
             await aegis_web_agent.initialize(headless=headless)
             return await aegis_web_agent.execute_with_axtree(task)
+        except Exception as e:
+            logger.error(f"[BROWSER-USE] Execution failed without fallback: {e}")
+            return {
+                "status": "FAILED",
+                "task": task,
+                "error": str(e),
+                "error_type": type(e).__name__,
+                "engine": "browser-use",
+            }
 
 browser_use_engine = AegisBrowserUseEngine()
