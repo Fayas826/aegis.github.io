@@ -106,6 +106,10 @@ _CONFIRMATION = re.compile(
     r"updated|deleted|connected|logged\s+in|signed\s+in)\b",
     re.IGNORECASE,
 )
+_CONTENT_REQUEST = re.compile(
+    r"\b(?:find|search|inspect|summari[sz]e|compare|research|details|information|events?)\b",
+    re.IGNORECASE,
+)
 
 
 def _clean(value: Any) -> str:
@@ -178,6 +182,9 @@ def derive_predicates(
     for confirmation in _CONFIRMATION.findall(normalized):
         add("text_contains", confirmation, f"Visible text contains '{confirmation}'.")
 
+    if _CONTENT_REQUEST.search(normalized):
+        add("content_present", "page-content", "The current page exposes readable task-relevant content.")
+
     if not predicates:
         return VerificationPlan(
             normalized,
@@ -211,7 +218,7 @@ def _text_values(observation: Observation) -> tuple[str, ...]:
             " ".join(str(item.get("text", "")) for item in observation.dom_context.get("elements", [])),
         )
     values: list[str] = []
-    for key in ("title", "page_title", "text", "body_text", "ocr_text", "content"):
+    for key in ("title", "page_title", "text", "text_snippet", "body_text", "ocr_text", "content"):
         value = observation.get(key)
         if isinstance(value, str):
             values.append(value)
@@ -268,6 +275,8 @@ def _matches(predicate: ExpectedPredicate, observation: Observation) -> bool:
                 continue
             return any(bool(control.get(key)) for key in ("activated", "clicked", "pressed", "selected"))
         return False
+    if predicate.kind == "content_present":
+        return any(len(value.strip()) >= 20 for value in _text_values(observation))
     return False
 
 

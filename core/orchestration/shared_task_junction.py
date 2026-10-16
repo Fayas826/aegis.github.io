@@ -23,7 +23,7 @@ class SharedTaskJunction:
 
     TABLE = "tasks"
     TERMINAL_STATUSES = {
-        "SUCCESS", "VERIFIED", "FAILED", "BLOCKED", "UNAVAILABLE",
+        "SUCCESS", "VERIFIED", "UNVERIFIED", "FAILED", "BLOCKED", "UNAVAILABLE",
         "TIMEOUT", "CANCELLED", "CONFIRMED",
     }
 

@@ -99,12 +99,14 @@ class AegisBrowserUseEngine:
             history = await agent.run(max_steps=max_steps)
             result_text = history.final_result() if hasattr(history, "final_result") else str(history)
 
-            logger.info(f"[BROWSER-USE] Execution completed successfully: {result_text[:200]}")
+            logger.info(f"[BROWSER-USE] Browser-Use produced a result requiring verification: {result_text[:200]}")
             return {
-                "status": "SUCCESS",
+                "status": "UNVERIFIED",
+                "action_status": "ACTION_SUCCEEDED",
                 "task": task,
                 "result": result_text,
-                "engine": "browser-use"
+                "engine": "browser-use",
+                "verification_required": True,
             }
 
         except ImportError as e:

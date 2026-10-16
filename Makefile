@@ -11,7 +11,9 @@ PYTHON_OFFLINE_TESTS := \
 	tests/smoke/test_phase_s_realtime.py \
 	tests/test_shared_task_junction.py \
 	tests/test_browser_security_policy.py \
-	tests/test_booking_portal_policy.py
+	tests/test_booking_portal_policy.py \
+	tests/test_web_truthful_runtime.py \
+	tests/test_neural_extensions_integration.py
 
 .PHONY: test test-python test-node build
 
