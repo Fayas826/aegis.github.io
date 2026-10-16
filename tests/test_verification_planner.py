@@ -109,4 +109,3 @@ def test_ambiguous_goal_requests_clarification():
     assert result.status is OutcomeStatus.CLARIFICATION_REQUIRED
     assert result.plan.is_ambiguous is True
     assert result.plan.clarification
-
