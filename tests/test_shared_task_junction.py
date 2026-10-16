@@ -1,6 +1,7 @@
 """Acceptance tests for the durable multi-agent task junction."""
 
 import asyncio
+import time
 
 from core.orchestration.agent_contract import TaskContext
 from core.orchestration.shared_task_junction import SharedTaskJunction
@@ -127,3 +128,59 @@ def test_swarm_does_not_promote_unverified_agent_result_to_success(tmp_path):
     assert result["status"] == "FAILED"
     assert result["error"]["error_code"] == "VERIFICATION_FAILED"
     assert junction.get(result["task_id"])["status"] == "FAILED"
+
+
+def test_swarm_requires_fresh_expected_outcome_evidence(tmp_path):
+    junction = SharedTaskJunction(AegisSQLiteStore(str(tmp_path / "verification.db")))
+    orchestrator = SwarmOrchestrator(junction=junction)
+
+    class BrowserAgent:
+        async def execute_task(self, goal, context=None):
+            return {
+                "status": "SUCCESS",
+                "observation": {
+                    "title": "Settings",
+                    "url": "https://example.test/settings",
+                    "timestamp": time.time(),
+                },
+            }
+
+    orchestrator.register_agent("browser", BrowserAgent())
+    result = asyncio.run(orchestrator.execute_swarm_task(
+        "browser",
+        "open settings",
+        {"verification_goal": "open the Settings page"},
+    ))
+
+    assert result["status"] == "SUCCESS"
+    assert result["final_result"]["verification"]["status"] == "VERIFIED"
+    saved = junction.get(result["task_id"])
+    assert any(event["type"] == "verification_result" for event in saved["events"])
+    assert any(item.get("status") == "VERIFIED" for item in saved["evidence"])
+
+
+def test_swarm_rejects_action_success_without_matching_expected_outcome(tmp_path):
+    junction = SharedTaskJunction(AegisSQLiteStore(str(tmp_path / "verification-fail.db")))
+    orchestrator = SwarmOrchestrator(junction=junction)
+
+    class BrowserAgent:
+        async def execute_task(self, goal, context=None):
+            return {
+                "status": "SUCCESS",
+                "observation": {
+                    "title": "Home",
+                    "url": "https://example.test/home",
+                    "timestamp": time.time(),
+                },
+            }
+
+    orchestrator.register_agent("browser", BrowserAgent())
+    result = asyncio.run(orchestrator.execute_swarm_task(
+        "browser",
+        "open settings",
+        {"verification_goal": "open the Settings page"},
+    ))
+
+    assert result["status"] == "FAILED"
+    assert result["error"]["error_code"] == "VERIFICATION_FAILED"
+    assert result["final_result"]["verification"]["status"] == "UNVERIFIED"

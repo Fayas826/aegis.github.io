@@ -317,6 +317,20 @@ class SwarmOrchestrator:
                 # 6. Honest Status Check — Never mask failure as success
                 is_failed = False
                 error_info = None
+                verification_result = self._verify_agent_result(current_goal, result, current_context)
+                if verification_result:
+                    verification_status = verification_result.get("status", "UNVERIFIED")
+                    self.junction.record_event(
+                        task_ctx.task_id,
+                        "verification_result",
+                        agent=current_agent_name,
+                        status=verification_status,
+                        evidence=verification_result,
+                        goal=verification_result.get("goal", current_goal),
+                    )
+                    if verification_status != "VERIFIED":
+                        is_failed = True
+                        error_info = verification_result.get("reason", "Expected outcome was not verified.")
                 if isinstance(result, dict):
                     status_str = str(result.get("status", "")).upper()
                     accepted_statuses = {"SUCCESS", "VERIFIED", "CONFIRMED"}
@@ -327,15 +341,17 @@ class SwarmOrchestrator:
                     }
                     if status_str in failure_statuses:
                         is_failed = True
-                        error_info = result.get("error") or result.get("reason") or "Underlying agent reported failure."
+                        error_info = error_info or result.get("error") or result.get("reason") or "Underlying agent reported failure."
                     elif status_str in accepted_statuses:
-                        is_failed = False
+                        # A transport-level success cannot override a failed
+                        # expected-outcome verification.
+                        is_failed = bool(is_failed)
                     elif status_str:
                         is_failed = True
-                        error_info = result.get("error") or result.get("reason") or f"Unsupported execution status: {status_str}"
+                        error_info = error_info or result.get("error") or result.get("reason") or f"Unsupported execution status: {status_str}"
                     elif result.get("success") is False:
                         is_failed = True
-                        error_info = result.get("error") or "Operation unsuccessful."
+                        error_info = error_info or result.get("error") or "Operation unsuccessful."
                 elif isinstance(result, str) and result.lower().startswith("error:"):
                     is_failed = True
                     error_info = result
@@ -352,7 +368,13 @@ class SwarmOrchestrator:
                 )
 
                 if is_failed:
-                    verification_failed = isinstance(result, dict) and str(result.get("status", "")).upper() == "UNVERIFIED"
+                    verification_failed = (
+                        isinstance(result, dict)
+                        and (
+                            str(result.get("status", "")).upper() == "UNVERIFIED"
+                            or (verification_result and verification_result.get("status") != "VERIFIED")
+                        )
+                    )
                     err = StructuredError(
                         error_code=(ErrorCode.VERIFICATION_FAILED.value if verification_failed else ErrorCode.EXECUTION_FAILED.value),
                         message=str(error_info),
@@ -467,6 +489,29 @@ class SwarmOrchestrator:
         if keyword == "goal":
             return fn(goal, context=shared) if accepts_context else fn(goal)
         return fn(**{keyword: goal, "context": shared}) if accepts_context else fn(**{keyword: goal})
+
+    @staticmethod
+    def _verify_agent_result(goal: str, result: Any, context: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Verify an agent result when the caller requests evidence-based completion."""
+        if not isinstance(result, dict):
+            return None
+        verification_goal = context.get("verification_goal") or result.get("verification_goal")
+        if not verification_goal:
+            return None
+        observation = (
+            result.get("observation")
+            or result.get("post_observation")
+            or (result.get("evidence") or {}).get("observation")
+        )
+        from core.orchestration.verification_planner import verify_goal
+        outcome = verify_goal(
+            str(verification_goal or goal),
+            observation,
+            action_attempted=True,
+            action_result=result,
+        )
+        result["verification"] = outcome.to_dict()
+        return result["verification"]
 
     def _record_terminal(self, payload: Dict[str, Any]) -> None:
         task_id = str(payload.get("task_id") or "")
