@@ -16,6 +16,25 @@ except ImportError:
 
 logger = logging.getLogger("AEGIS.BrowserDriver")
 
+SECURITY_CHALLENGE_MARKERS = (
+    "captcha",
+    "turnstile",
+    "cloudflare",
+    "verify you are human",
+    "checking your browser",
+    "access denied",
+    "security check",
+)
+
+
+def detect_security_challenge(text: str) -> Optional[str]:
+    """Return a challenge marker found in rendered page text, if any."""
+    lowered = (text or "").lower()
+    for marker in SECURITY_CHALLENGE_MARKERS:
+        if marker in lowered:
+            return marker
+    return None
+
 # Win32 user32/kernel32 handles for foreground and window verification
 if sys.platform == "win32":
     import ctypes
@@ -177,34 +196,58 @@ class PlaywrightBrowserDriver:
             pass
 
         try:
+            # Check if browser is already the foreground visible window
+            now_fg = _user32.GetForegroundWindow()
+            is_visible = bool(_user32.IsWindowVisible(target_hwnd))
+            is_iconic = bool(_user32.IsIconic(target_hwnd)) if hasattr(_user32, "IsIconic") else False
+            is_zoomed = bool(_user32.IsZoomed(target_hwnd)) if hasattr(_user32, "IsZoomed") else False
+
+            if now_fg == target_hwnd and is_visible and not is_iconic:
+                self.window_state.update({
+                    "WINDOW_CREATED": True,
+                    "WINDOW_VISIBLE": True,
+                    "FOREGROUND_CONFIRMED": True
+                })
+                return {
+                    "status": "FOREGROUND_CONFIRMED",
+                    "WINDOW_CREATED": True,
+                    "WINDOW_VISIBLE": True,
+                    "FOREGROUND_CONFIRMED": True,
+                    "hwnd": target_hwnd,
+                    "pid": self.browser_pid
+                }
+
             # 1. Unlock foreground lock timeout
             SPI_SETFOREGROUNDLOCKTIMEOUT = 0x2001
             _user32.SystemParametersInfoW(SPI_SETFOREGROUNDLOCKTIMEOUT, 0, 0, 0x03)
             _user32.AllowSetForegroundWindow(-1)
 
-            # 2. Attach thread input to foreground window
-            fg_hwnd = _user32.GetForegroundWindow()
-            fg_thread_id = _user32.GetWindowThreadProcessId(fg_hwnd, None)
-            cur_thread_id = _kernel32.GetCurrentThreadId()
-            attached = False
-            if fg_thread_id != cur_thread_id:
-                attached = bool(_user32.AttachThreadInput(cur_thread_id, fg_thread_id, True))
+            # 2. Window state management without chaotic flickering
+            if is_iconic:
+                _user32.ShowWindow(target_hwnd, 9)  # SW_RESTORE
+            elif not is_zoomed:
+                _user32.ShowWindow(target_hwnd, 3)  # SW_SHOWMAXIMIZED
 
-            # 3. Pulse Alt key to satisfy Windows focus heuristics
-            _user32.keybd_event(0x12, 0, 0, 0)
-            _user32.keybd_event(0x12, 0, 2, 0)
-
-            # 4. Restore, Maximize and Bring to Top
-            _user32.ShowWindow(target_hwnd, 9)  # SW_RESTORE
-            time.sleep(0.05)
-            _user32.ShowWindow(target_hwnd, 3)  # SW_SHOWMAXIMIZED
             _user32.BringWindowToTop(target_hwnd)
-            _user32.SetForegroundWindow(target_hwnd)
+            set_fg_ok = _user32.SetForegroundWindow(target_hwnd)
 
-            if attached:
-                _user32.AttachThreadInput(cur_thread_id, fg_thread_id, False)
+            # 3. Only attach thread input and pulse Alt if direct SetForegroundWindow failed
+            if not set_fg_ok or _user32.GetForegroundWindow() != target_hwnd:
+                fg_hwnd = _user32.GetForegroundWindow()
+                fg_thread_id = _user32.GetWindowThreadProcessId(fg_hwnd, None)
+                cur_thread_id = _kernel32.GetCurrentThreadId()
+                attached = False
+                if fg_thread_id != cur_thread_id:
+                    attached = bool(_user32.AttachThreadInput(cur_thread_id, fg_thread_id, True))
 
-            time.sleep(0.1)
+                _user32.keybd_event(0x12, 0, 0, 0)
+                _user32.keybd_event(0x12, 0, 2, 0)
+                _user32.SetForegroundWindow(target_hwnd)
+
+                if attached:
+                    _user32.AttachThreadInput(cur_thread_id, fg_thread_id, False)
+
+            time.sleep(0.05)
             now_fg = _user32.GetForegroundWindow()
             is_visible = bool(_user32.IsWindowVisible(target_hwnd))
             fg_confirmed = (now_fg == target_hwnd)
@@ -348,8 +391,6 @@ class PlaywrightBrowserDriver:
             self.playwright = await async_playwright().start()
 
         launch_args = [
-            "--no-sandbox",
-            "--disable-blink-features=AutomationControlled",
             "--start-maximized"
         ]
 
@@ -406,6 +447,12 @@ class PlaywrightBrowserDriver:
             await page.goto(url, wait_until=wait_until, timeout=timeout)
             await page.wait_for_timeout(1000)
 
+            state = await self.observe_page_state()
+            if state.get("security_challenge"):
+                self.last_action = f"NAVIGATE to {url}"
+                self.last_outcome = f"BLOCKED: security challenge ({state['security_challenge']})"
+                return False
+
             if self.execution_mode == "visible":
                 await self.discover_browser_window()
                 self.force_foreground()
@@ -418,6 +465,66 @@ class PlaywrightBrowserDriver:
             self.last_action = f"NAVIGATE to {url}"
             self.last_outcome = f"FAILED: {e}"
             return False
+
+    async def observe_page_state(self, text_limit: int = 2000) -> Dict[str, Any]:
+        """Capture fresh, structured browser state after an action."""
+        page = self.get_page()
+        observed_at = time.time()
+        if not page:
+            return {
+                "available": False,
+                "url": "",
+                "title": "",
+                "text": "",
+                "element_count": 0,
+                "security_challenge": None,
+                "observed_at": observed_at,
+            }
+        try:
+            title = await page.title()
+        except Exception:
+            title = ""
+        try:
+            body_text = await page.locator("body").inner_text(timeout=2000)
+        except Exception:
+            body_text = ""
+        try:
+            elements = await self.get_active_elements()
+        except Exception:
+            elements = []
+        return {
+            "available": True,
+            "url": page.url,
+            "title": title,
+            "text": (body_text or "")[:text_limit],
+            "element_count": len(elements),
+            "security_challenge": detect_security_challenge(body_text),
+            "observed_at": observed_at,
+        }
+
+    @staticmethod
+    def verify_page_state(before: Dict[str, Any], after: Dict[str, Any], *,
+                          url_contains: Optional[str] = None,
+                          text_contains: Optional[str] = None) -> Dict[str, Any]:
+        """Compare two fresh observations without claiming an action succeeded."""
+        if not after or not after.get("available"):
+            return {"verified": False, "status": "UNAVAILABLE", "reason": "page unavailable"}
+        challenge = after.get("security_challenge")
+        if challenge:
+            return {"verified": False, "status": "BLOCKED", "reason": f"security challenge: {challenge}"}
+        url_ok = not url_contains or url_contains.lower() in str(after.get("url", "")).lower()
+        text_ok = not text_contains or text_contains.lower() in str(after.get("text", "")).lower()
+        changed = (before or {}).get("url") != after.get("url") or (before or {}).get("text") != after.get("text")
+        verified = bool(url_ok and text_ok and (changed or url_contains or text_contains))
+        return {
+            "verified": verified,
+            "status": "VERIFIED" if verified else "UNVERIFIED",
+            "changed": changed,
+            "url_ok": url_ok,
+            "text_ok": text_ok,
+            "before_observed_at": (before or {}).get("observed_at"),
+            "after_observed_at": after.get("observed_at"),
+        }
 
     async def get_current_url(self) -> str:
         """Returns the current URL of the active page."""
@@ -478,6 +585,11 @@ class PlaywrightBrowserDriver:
             await loc.wait_for(state="visible", timeout=timeout)
             await loc.click()
             await page.wait_for_timeout(500)
+            state = await self.observe_page_state()
+            if state.get("security_challenge"):
+                self.last_outcome = f"BLOCKED: security challenge ({state['security_challenge']})"
+                return False
+            self.last_outcome = "ACTION_UNVERIFIED"
             return True
         except Exception as e:
             logger.warning(f"[BROWSER] Click failed on '{selector}': {e}")
@@ -493,6 +605,11 @@ class PlaywrightBrowserDriver:
             await loc.wait_for(state="visible", timeout=timeout)
             await loc.fill(text)
             await page.wait_for_timeout(300)
+            state = await self.observe_page_state()
+            if state.get("security_challenge"):
+                self.last_outcome = f"BLOCKED: security challenge ({state['security_challenge']})"
+                return False
+            self.last_outcome = "ACTION_UNVERIFIED"
             return True
         except Exception as e:
             logger.warning(f"[BROWSER] Fill failed on '{selector}': {e}")
@@ -516,6 +633,11 @@ class PlaywrightBrowserDriver:
             await loc.wait_for(state="visible", timeout=timeout)
             await loc.click()
             await page.wait_for_timeout(500)
+            state = await self.observe_page_state()
+            if state.get("security_challenge"):
+                self.last_outcome = f"BLOCKED: security challenge ({state['security_challenge']})"
+                return False
+            self.last_outcome = "ACTION_UNVERIFIED"
             return True
         except Exception as e:
             logger.warning(f"[BROWSER] Semantic click failed for role='{role}', text='{text}': {e}")
@@ -537,6 +659,11 @@ class PlaywrightBrowserDriver:
             await loc.wait_for(state="visible", timeout=timeout)
             await loc.fill(text)
             await page.wait_for_timeout(300)
+            state = await self.observe_page_state()
+            if state.get("security_challenge"):
+                self.last_outcome = f"BLOCKED: security challenge ({state['security_challenge']})"
+                return False
+            self.last_outcome = "ACTION_UNVERIFIED"
             return True
         except Exception as e:
             logger.warning(f"[BROWSER] Semantic fill failed for placeholder='{placeholder}', label='{label}': {e}")

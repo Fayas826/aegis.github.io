@@ -17,3 +17,14 @@ def test_booking_does_not_default_to_local_mock_portal(monkeypatch):
     assert result["status"] == "FAILED"
     assert "SITE_URL_REQUIRED" in result["error"]
     assert "127.0.0.1:8765" not in result["context"].get("portal_url", "")
+
+
+def test_booking_rejects_non_http_site_urls():
+    booker = JarvisTicketBooker(headless=True)
+    result = asyncio.run(booker.execute_booking_flow(
+        BookingIntent(movie_name="Example Movie", city="Kochi"),
+        site_url="file:///tmp/fake-booking.html",
+        auto_authorize=False,
+    ))
+    assert result["status"] == "FAILED"
+    assert "INVALID_SITE_URL" in result["error"]

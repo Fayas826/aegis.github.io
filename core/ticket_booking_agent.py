@@ -13,6 +13,7 @@ import asyncio
 import sys
 import re
 import logging
+from urllib.parse import urlparse
 from typing import Dict, Any, List, Optional
 from dotenv import load_dotenv
 load_dotenv()
@@ -967,12 +968,6 @@ class JarvisTicketBooker:
             sm.transition_to(BookingState.FAILED, "Missing required movie title")
             return {"status": "FAILED", "error": sm.ctx.error, "context": sm.ctx.model_dump()}
 
-        await self.start()
-        if not self.page:
-            sm.ctx.error = "BROWSER_UNAVAILABLE: Failed to launch or attach Playwright page."
-            sm.transition_to(BookingState.FAILED, "Browser unavailable")
-            return {"status": "FAILED", "error": sm.ctx.error, "context": sm.ctx.model_dump()}
-
         # Never silently route a real booking request to the deterministic
         # local test portal. Production callers must provide an explicit
         # authorized site URL or configure one intentionally.
@@ -984,7 +979,20 @@ class JarvisTicketBooker:
             )
             sm.transition_to(BookingState.FAILED, "No authorized booking site configured")
             return {"status": "FAILED", "error": sm.ctx.error, "context": sm.ctx.model_dump()}
+        parsed_url = urlparse(target_url)
+        if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
+            sm.ctx.error = (
+                "INVALID_SITE_URL: Booking sites must be explicit HTTP(S) URLs with a host."
+            )
+            sm.transition_to(BookingState.FAILED, "Invalid booking site URL")
+            return {"status": "FAILED", "error": sm.ctx.error, "context": sm.ctx.model_dump()}
         sm.ctx.portal_url = target_url
+
+        await self.start()
+        if not self.page:
+            sm.ctx.error = "BROWSER_UNAVAILABLE: Failed to launch or attach Playwright page."
+            sm.transition_to(BookingState.FAILED, "Browser unavailable")
+            return {"status": "FAILED", "error": sm.ctx.error, "context": sm.ctx.model_dump()}
 
         try:
             # 2. SEARCHING
