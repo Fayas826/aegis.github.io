@@ -288,3 +288,21 @@ def test_inventory_launch_tolerates_pixels_but_not_foreground_identity_changes()
         window_id=99, active_window="Other App", active_process="other.exe")
     assert layer.launch("NovelEditor.exe", timeout=0).status == "BLOCKED"
     assert len(launches) == 1
+
+
+def test_semantic_text_input_tolerates_accessibility_tree_churn_but_not_window_change():
+    from types import SimpleNamespace
+    snapshots = [
+        DesktopObservation("SUCCESS", 120, 90, active_window="Untitled - Editor", active_process="editor.exe",
+                            window_id=12, elements=(DesktopElement("focus", "", "Document", (1, 1, 10, 10), source="uia"),)),
+        DesktopObservation("SUCCESS", 120, 90, active_window="Untitled - Editor", active_process="editor.exe",
+                            window_id=12, elements=()),
+        DesktopObservation("SUCCESS", 120, 90, active_window="Untitled - Editor", active_process="editor.exe",
+                            window_id=12, elements=()),
+    ]
+    sent = []
+    layer = DesktopActionLayer(SimpleNamespace(observe=lambda: snapshots.pop(0)),
+        backend=SimpleNamespace(type_text=lambda text: sent.append(text)))
+    layer.bind_observation(snapshots[0])
+    assert layer.type_text("once").status == "SUCCESS"
+    assert sent == ["once"]

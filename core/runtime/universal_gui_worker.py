@@ -707,6 +707,21 @@ class UniversalGUIWorker:
                     if isinstance(inventory.get(key), list):
                         entry["inventory"][key] = inventory[key][:12]
             progress.append(entry)
+        completed_text = [
+            entry.get("arguments", {}).get("text")
+            for entry in progress
+            if entry.get("action") in {"type_text", "paste_text"}
+            and entry.get("status") == "SUCCESS"
+            and isinstance(entry.get("arguments"), Mapping)
+            and isinstance(entry.get("arguments", {}).get("text"), str)
+        ]
+        completed_text_instruction = ""
+        if completed_text:
+            completed_text_instruction = (
+                " The following text input already succeeded and is forbidden to repeat: "
+                + json.dumps(completed_text[-3:], ensure_ascii=False)
+                + ". Choose a different action."
+            )
         unavailable = {"click_normalized", "move_normalized", "drag"} if not vision else set()
         if not vision and not native:
             unavailable.update({"click_element", "type_text", "hotkey", "scroll"})
@@ -725,8 +740,11 @@ class UniversalGUIWorker:
                 fields.append(key + ("" if key in schema["required"] else "?") + ":" + kind)
             catalog.append(tool["name"] + "(" + ", ".join(fields) + ")")
         system = (_SYSTEM + '\nReturn only one JSON object: {"action":{"name":"tool_name","args":{}}} '
-                  'or {"done":true}. Done is only a request for independent verification, not proof. '
-                  'Do not output Python, JavaScript, shell commands, markdown fences, or a list of actions. '
+                   'or {"done":true}. Done is only a request for independent verification, not proof. '
+                   'If progress shows a successful type_text or paste_text, never repeat that exact input; '
+                   'continue with the next save, close, reopen, or verification action. '
+                   + completed_text_instruction +
+                   'Do not output Python, JavaScript, shell commands, markdown fences, or a list of actions. '
                   'Optional args.expected_change explains the expected visible change. '
                   'Available tools (? marks an optional argument):\n' + "\n".join(catalog))
         prompt = json.dumps({"goal": goal, "original_goal": params.get("original_goal", goal),

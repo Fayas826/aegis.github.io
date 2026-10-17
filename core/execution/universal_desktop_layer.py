@@ -517,7 +517,9 @@ class DesktopActionLayer:
         # Inventory-grounded window operations do not target the old screen's
         # controls. Still require unchanged foreground identity/geometry and
         # revalidate the exact app/window/path, but tolerate a blinking spinner.
-        controls_exact = action not in {"launch", "focus_window", "open_folder", "wait"}
+        controls_exact = action not in {
+            "launch", "focus_window", "open_folder", "wait", "type_text", "hotkey", "scroll"
+        }
         reason = self._stale(before, expected, pixel_exact, controls_exact)
         if not reason and validate:
             try:
@@ -684,7 +686,9 @@ class DesktopActionLayer:
             sent = False
             try:
                 current = self._fresh()
-                reason = self._stale(current, observation, pixel_exact=False) or self._guard("paste_text")
+                # Clipboard input is semantic keyboard input too: native UIA
+                # trees may churn while the focused editor remains unchanged.
+                reason = self._stale(current, observation, pixel_exact=False, controls_exact=False) or self._guard("paste_text")
                 if reason:
                     raise RuntimeError(reason)
                 self._send_hotkey(["ctrl", "v"])
