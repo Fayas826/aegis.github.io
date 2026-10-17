@@ -1,4 +1,5 @@
 from core.execution.universal_desktop_layer import DesktopActionLayer
+from core.execution.universal_dispatch import execute_universal_goal, goal_for_action, universal_mode
 from core.perception.universal_desktop_layer import (
     BLOCKED,
     SUCCESS,
@@ -69,3 +70,49 @@ def test_unavailable_capture_is_truthful():
     result = DesktopActionLayer(perception=perception, backend=object()).scroll(1)
     assert result.status == "UNAVAILABLE"
     assert result.before and "no display" in (result.before.error or "")
+
+
+def test_universal_dispatch_defaults_and_supports_legacy_mode():
+    assert universal_mode({}) == "universal"
+    assert universal_mode({"execution_mode": "legacy"}) == "legacy"
+    assert goal_for_action("APP_OPEN", {"app_name": "Notepad"}) == "Open Notepad"
+
+
+def test_universal_dispatch_uses_injected_runtime():
+    class Runtime:
+        async def execute_goal(self, goal, surface=None):
+            return {"status": "VERIFIED", "detail": goal, "surface": surface}
+
+    async def run():
+        return await execute_universal_goal("Open Notepad", runtime=Runtime(), surface="desktop")
+
+    import asyncio
+    result = asyncio.run(run())
+    assert result["status"] == "VERIFIED"
+    assert result["detail"] == "Open Notepad"
+    assert result["surface"] == "desktop"
+
+
+def test_task_engine_defaults_to_universal_and_preserves_legacy_opt_out(monkeypatch):
+    from core.orchestration.task_engine import TaskEngine, TaskStep
+    import core.orchestration.task_engine as task_engine_module
+
+    calls = []
+
+    async def universal(goal, *, surface=None):
+        calls.append(("universal", goal, surface))
+        return {"status": "VERIFIED", "goal": goal}
+
+    async def legacy(action, payload):
+        calls.append(("legacy", action, payload))
+        return {"status": "SUCCESS"}
+
+    monkeypatch.setattr(task_engine_module, "execute_universal_goal", universal)
+    engine = TaskEngine.__new__(TaskEngine)
+    engine.controller = legacy
+
+    import asyncio
+    asyncio.run(engine._dispatch_step(TaskStep(action_type="APP_OPEN", payload={"app_name": "Notepad"})))
+    asyncio.run(engine._dispatch_step(TaskStep(action_type="APP_OPEN", payload={"app_name": "Notepad", "execution_mode": "legacy"})))
+    assert calls[0] == ("universal", "Open Notepad", None)
+    assert calls[1][0] == "legacy"

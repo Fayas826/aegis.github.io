@@ -10,6 +10,12 @@ from datetime import datetime
 from core.cognition.reasoning.skills.skill_system import skill_registry
 from core.reliability.reliability_engine import reliability_engine
 from infrastructure.config.settings import TASK_HISTORY_PATH
+from core.execution.universal_dispatch import (
+    UNIVERSAL_ACTION_TYPES,
+    execute_universal_goal,
+    goal_for_action,
+    universal_mode,
+)
 
 @dataclass
 class TaskStep:
@@ -97,9 +103,9 @@ class TaskEngine:
                     else:
                         raise Exception(f"Skill not found: {skill_name}")
                 else:
-                    result = await self.controller(step.action_type, step.payload)
+                    result = await self._dispatch_step(step)
                 
-                if result.get("status") == "SUCCESS":
+                if result.get("status") in {"SUCCESS", "VERIFIED"}:
                     step.status = "SUCCESS"
                     step.result = result
                     step.ended_at = time.time()
@@ -115,6 +121,20 @@ class TaskEngine:
                     return False
                 await asyncio.sleep(1)
         return False
+
+    async def _dispatch_step(self, step: TaskStep) -> Dict:
+        """Use universal execution by default, with a per-step legacy escape hatch.
+
+        The old controller remains intact and is selected with
+        ``payload.execution_mode = 'legacy'``.  This lets existing workflows
+        migrate incrementally without making app-specific actions disappear.
+        """
+
+        if step.action_type in UNIVERSAL_ACTION_TYPES and universal_mode(step.payload) != "legacy":
+            surface = step.payload.get("surface") if isinstance(step.payload, dict) else None
+            goal = goal_for_action(step.action_type, step.payload, step.description)
+            return await execute_universal_goal(goal, surface=surface)
+        return await self.controller(step.action_type, step.payload)
 
     async def _rollback_task(self, steps: List[TaskStep]):
         """Undoes successful steps in reverse order."""
