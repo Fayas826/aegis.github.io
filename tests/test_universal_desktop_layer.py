@@ -1,4 +1,5 @@
 from core.execution.universal_desktop_layer import DesktopActionLayer
+import pytest
 from core.execution.universal_dispatch import (
     execute_universal_goal,
     goal_for_action,
@@ -15,6 +16,15 @@ from core.perception.universal_desktop_layer import (
     fuse_elements,
     normalize_coordinates,
 )
+
+
+@pytest.fixture(autouse=True)
+def isolated_worker_receipts(monkeypatch, tmp_path):
+    import core.orchestration.shared_task_junction as junction_module
+    from core.storage.sqlite_store import AegisSQLiteStore
+    from core.runtime.universal_gui_worker import UniversalGUIWorker
+    monkeypatch.setattr(junction_module, "task_junction", junction_module.SharedTaskJunction(AegisSQLiteStore(str(tmp_path / "worker.db"))))
+    monkeypatch.setattr(UniversalGUIWorker, "_neural_event", lambda *args, **kwargs: None)
 
 
 def _capture():

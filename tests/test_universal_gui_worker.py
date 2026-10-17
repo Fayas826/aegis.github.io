@@ -3,9 +3,24 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+import pytest
 
 from core.perception.universal_desktop_layer import DesktopObservation, SUCCESS
 from core.runtime.universal_gui_worker import UniversalGUIWorker, _verified_open_goal
+
+
+@pytest.fixture(autouse=True)
+def isolate_local_inventory(monkeypatch, tmp_path):
+    from core.model_gateway.local_provider import LocalProvider
+    import core.orchestration.shared_task_junction as junction_module
+    from core.storage.sqlite_store import AegisSQLiteStore
+    monkeypatch.setattr(junction_module, "task_junction", junction_module.SharedTaskJunction(AegisSQLiteStore(str(tmp_path / "worker.db"))))
+    monkeypatch.setattr(UniversalGUIWorker, "_neural_event", lambda *args, **kwargs: None)
+    monkeypatch.setenv("AEGIS_LOCAL_FIRST", "true")
+    monkeypatch.setenv("AEGIS_GUI_PROVIDER", "auto")
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setattr(LocalProvider, "probe_desktop", staticmethod(lambda **kwargs: {"status": "UNAVAILABLE"}))
 
 
 class FakePerception:
@@ -58,7 +73,7 @@ def test_open_goal_verification_uses_observed_window():
 def test_worker_reports_unavailable_without_gemini_key():
     worker = UniversalGUIWorker(perception=FakePerception(), api_key_env="MISSING_AEGIS_KEY")
     result = worker.run_task("type a short note in the active editor")
-    assert result["status"] == "UNAVAILABLE"
+    assert result["status"] == "UNAVAILABLE", result
 
 
 def test_simple_open_goal_works_without_model_when_fresh_window_matches():
@@ -69,7 +84,7 @@ def test_simple_open_goal_works_without_model_when_fresh_window_matches():
         api_key_env="MISSING_AEGIS_KEY",
     )
     result = worker.run_task("open Notepad")
-    assert result["status"] == "VERIFIED"
+    assert result["status"] == "VERIFIED", result
     assert actions.program.lower().startswith("notepad")
 
 

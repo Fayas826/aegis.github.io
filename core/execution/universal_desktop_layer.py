@@ -421,23 +421,23 @@ class DesktopActionLayer:
                                    getattr(self.backend, "name", "") if self.backend else "")
 
     @staticmethod
-    def _signature(observation: DesktopObservation, pixel_exact: bool = True) -> tuple[Any, ...]:
+    def _signature(observation: DesktopObservation, pixel_exact: bool = True, controls_exact: bool = True) -> tuple[Any, ...]:
         # IDs and timestamps identify captures, not their stable desktop state.
         # Keep geometry/window checks even when a provider's fingerprint omits them.
-        return (getattr(observation, "state_fingerprint", None) if pixel_exact or not observation.elements else None,
+        return (getattr(observation, "state_fingerprint", None) if pixel_exact or (controls_exact and not observation.elements) else None,
                 observation.width, observation.height, tuple(getattr(observation, "origin", (0, 0))),
                 getattr(observation, "window_id", 0), tuple(getattr(observation, "window_bounds", ())),
                 getattr(observation, "process_id", 0), observation.active_window, observation.active_process,
                 observation.image_b64 if getattr(observation, "state_fingerprint", None) is None else None,
                 tuple((e.element_id, e.text, e.role, tuple(e.bbox), e.visible, e.clickable,
                        getattr(e, "enabled", True), repr(getattr(e, "metadata", {})))
-                      for e in observation.elements))
+                      for e in observation.elements) if controls_exact else ())
 
-    def _stale(self, current: DesktopObservation, expected: DesktopObservation, pixel_exact: bool = True) -> Optional[str]:
+    def _stale(self, current: DesktopObservation, expected: DesktopObservation, pixel_exact: bool = True, controls_exact: bool = True) -> Optional[str]:
         if current.status != SUCCESS or expected.status != SUCCESS:
             return "fresh successful observation required before input"
         try:
-            if self._signature(current, pixel_exact) != self._signature(expected, pixel_exact):
+            if self._signature(current, pixel_exact, controls_exact) != self._signature(expected, pixel_exact, controls_exact):
                 return "decision observation is stale: fingerprint, window or geometry changed"
         except Exception:
             return "observation grounding is invalid"
@@ -477,7 +477,11 @@ class DesktopActionLayer:
         # and focus changes instead require identical native/control state;
         # a blinking caret alone must not make typing impossible.
         pixel_exact = action in {"click_normalized", "move_normalized", "drag"}
-        reason = self._stale(before, expected, pixel_exact)
+        # Inventory-grounded window operations do not target the old screen's
+        # controls. Still require unchanged foreground identity/geometry and
+        # revalidate the exact app/window/path, but tolerate a blinking spinner.
+        controls_exact = action not in {"launch", "focus_window", "open_folder", "wait"}
+        reason = self._stale(before, expected, pixel_exact, controls_exact)
         if not reason and validate:
             try:
                 reason = validate(before)
@@ -488,7 +492,7 @@ class DesktopActionLayer:
         if needs_driver and self._driver() is None:
             return self._result(action, UNAVAILABLE, "desktop input backend unavailable", before)
         current = self._fresh()
-        reason = self._stale(current, expected, pixel_exact)
+        reason = self._stale(current, expected, pixel_exact, controls_exact)
         if not reason and validate:
             try:
                 reason = validate(current)
@@ -933,13 +937,21 @@ class DesktopActionLayer:
         if os.path.isabs(program) and _safe_executable(program):
             return {"name": ntpath.splitext(ntpath.basename(program))[0], "path": os.path.realpath(program),
                     "kind": "executable", "launchable": True}
-        discovered = self.discover_applications(program)
+        # Display-name packaged apps often have no matching executable alias.
+        # Normalize a plain .exe suffix for inventory lookup, never for an
+        # arbitrary path, shell string or application ID.
+        display_alias = (program[:-4] if program.casefold().endswith(".exe") and
+                         not any(separator in program for separator in ("/", "\\", ":", "!")) else program)
+        discovered = self.discover_applications(display_alias)
         matches = []
         for item in discovered.get("items", ()):
             identifiers = (item.get("name", ""), item.get("path", ""), item.get("aumid", ""),
                            ntpath.basename(item.get("path", "")),
                            ntpath.splitext(ntpath.basename(item.get("path", "")))[0])
-            if item.get("launchable") and program.casefold() in [str(x).casefold() for x in identifiers]:
+            aliases = {program.casefold()}
+            if item.get("kind") == "packaged":
+                aliases.add(display_alias.casefold())
+            if item.get("launchable") and aliases.intersection(str(x).casefold() for x in identifiers):
                 matches.append(item)
         # Prefer the same executable over a shortcut alias, but reject genuinely
         # ambiguous names rather than guessing which installation the user meant.

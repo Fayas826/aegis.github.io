@@ -1,5 +1,16 @@
 # Phase 4.5H validation — in progress
 
+## Local-model follow-up
+
+The missing-cloud-key blocker below describes the earlier check, not the current
+capability. Installed local Ollama models are now connected to the canonical
+worker. Local sovereign-model JSON inference passed without an API key; the
+expanded focused suite passed 183 tests. Native window state was independently
+verified through TaskEngine after a guarded local-model Calculator launch.
+Moondream image inference and complete three-category/document acceptance are
+still not passed. See `local-desktop-runtime.md` for exact distinctions and the
+additional circuit-breaker, cancellation lookup and bounded-UIA fixes.
+
 ## Scope of this working step
 
 The existing universal perception/action layers, TaskEngine dispatch,
@@ -83,7 +94,8 @@ Three-category model-driven acceptance is **NOT RUN / BLOCKED**, not passed.
 
 ## Remaining work before claiming Phase 4.5H complete
 
-1. Configure one supported provider securely in the runner's environment.
+1. Select a working installed local provider/model in the runner's environment,
+   or explicitly configure a cloud provider. Cloud keys are optional.
 2. Supply host-owned task verification contracts and explicitly allowed roots.
    Run reversible model-selected tasks across at least three actual application
    categories, including the complete document workflow, with independent

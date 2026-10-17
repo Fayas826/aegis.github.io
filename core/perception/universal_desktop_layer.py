@@ -14,6 +14,7 @@ import io
 import json
 import math
 import sys
+import threading
 import time
 import uuid
 from contextlib import contextmanager
@@ -570,6 +571,44 @@ def _default_uia() -> tuple[Sequence[Any], Optional[str]]:
         return (), f"UI Automation scan failed: {exc}"
 
 
+_UIA_SCAN_LOCK = threading.Lock()
+_UIA_SCAN_PENDING = None
+
+
+def _bounded_default_uia(window_id: int = 0, timeout: float = 1.0) -> tuple[Sequence[Any], Optional[str]]:
+    """A hung read-only COM call must not trap the desktop action thread.
+
+    At most one native scan can be outstanding. Timed-out results are discarded,
+    never cached as fresh evidence. Python cannot kill a hung COM call; the one
+    daemon reader may remain blocked, but no new reader/input threads accumulate.
+    """
+    global _UIA_SCAN_PENDING
+    request = {"done": threading.Event(), "result": ((), "UIA read unavailable")}
+    with _UIA_SCAN_LOCK:
+        if _UIA_SCAN_PENDING is not None:
+            return (), "Previous UIA read is still pending; no stale controls reused"
+        _UIA_SCAN_PENDING = request
+
+    def scan():
+        global _UIA_SCAN_PENDING
+        try:
+            request["result"] = _default_uia()
+        except Exception:
+            request["result"] = ((), "Native UIA read failed")
+        finally:
+            with _UIA_SCAN_LOCK:
+                if _UIA_SCAN_PENDING is request:
+                    _UIA_SCAN_PENDING = None
+            request["done"].set()
+
+    threading.Thread(target=scan, name="aegis-uia-reader", daemon=True).start()
+    if not request["done"].wait(timeout):
+        return (), "UIA read exceeded its time budget; controls unavailable"
+    if window_id and sys.platform == "win32" and _windows_snapshot().get("window_id") != window_id:
+        return (), "Foreground changed during UIA read; controls discarded"
+    return request["result"]
+
+
 def _traverse_uia(root: Any, max_nodes: int = 4096) -> tuple[Sequence[Any], Optional[str]]:
     """Iterative traversal with a node budget, not an arbitrary depth cutoff.
 
@@ -755,7 +794,7 @@ class DesktopPerception:
                     uia = localize(uia, "uia", True)
                     sources.append("uia")
                 else:
-                    uia, uia_error = _default_uia()
+                    uia, uia_error = _bounded_default_uia(window_id)
                     uia = localize(uia, "uia", True)
                     if uia:
                         sources.append("uia")

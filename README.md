@@ -130,11 +130,31 @@ remain separate. A failed or unverified mission is not blindly replayed, and
 The registry entry is `desktop.universal_goal`; the explicit legacy escape hatch
 remains `payload.execution_mode = "legacy"`.
 
-Gemini and OpenAI share bounded action schemas and fresh-observation grounding.
-Configure `GEMINI_API_KEY` or `OPENAI_API_KEY` in the **process environment**;
-`AEGIS_GUI_PROVIDER=gemini` or `openai` selects one explicitly. The CLI does not
-automatically load `.env`. Never paste a key into a goal or commit it. A
-configured provider failure does not silently switch providers or to a script.
+Local Ollama, Gemini and OpenAI share bounded actions and fresh-observation
+grounding. **Cloud keys are not required for installed local models.** Automatic
+selection prefers an installed local model; `AEGIS_GUI_PROVIDER=local` makes the
+local boundary explicit. No model is pulled or downloaded by the desktop worker.
+`AEGIS_GUI_LOCAL_MODEL` selects an exact installed model ID. `OLLAMA_HOST` or
+`OLLAMA_BASE_URL` must identify loopback; a server wildcard bind is mapped to
+loopback rather than used as a destination. Proxies and redirects are disabled.
+
+For example, on Windows with your existing sovereign model installed:
+
+```powershell
+$env:AEGIS_GUI_PROVIDER = "local"
+$env:AEGIS_GUI_LOCAL_MODEL = "aegis-sovereign:latest"
+$env:AEGIS_LOCAL_FIRST = "true"
+python run_aegis_universal.py "Open Calculator"
+```
+
+Text models use fresh native accessibility/window evidence, not imagined visual
+coordinates. Window inventory alone permits window operations, not typing or
+clicking controls. Vision metadata does not establish working inference: the
+latest Moondream synthetic-image check timed out, so choose a verified working
+model explicitly. `GEMINI_API_KEY`/`OPENAI_API_KEY` are needed only for explicit
+cloud choices (`AEGIS_GUI_PROVIDER=gemini`/`openai`). The CLI does not automatically
+load `.env`. Never commit keys or put them in goals. A selected-provider failure
+does not silently switch providers, execute a script, or authorize cloud fallback.
 
 ```bash
 python run_aegis_universal.py "Open the editor and prepare a short draft"
@@ -153,3 +173,4 @@ Offline mocks are not live acceptance. Three-category model-driven acceptance
 and a real multi-step save/close/reopen/readback are still pending. Some older
 chat/voice fast paths bypass TaskEngine and have not been migrated in this step.
 See `docs/phase-4.5h-validation.md` for actual checks and remaining blockers.
+The local-model/circuit-breaker follow-up is in `docs/local-desktop-runtime.md`.

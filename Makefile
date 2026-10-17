@@ -19,6 +19,10 @@ PYTHON_OFFLINE_TESTS := \
 	tests/test_universal_desktop_layer.py \
 	tests/test_universal_gui_worker.py \
 	tests/test_universal_runtime_safety.py \
+	tests/test_circuit_breaker.py \
+	tests/test_local_desktop_provider.py \
+	tests/test_local_desktop_worker.py \
+	tests/test_storage_task_lookup.py \
 	tests/test_verification_planner.py \
 	tests/test_multimodal_runtime.py \
 	tests/test_gemini_computer_use_agent.py

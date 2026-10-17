@@ -1,6 +1,6 @@
 """Canonical bounded observe/plan/act/verify desktop worker.
 
-Gemini and OpenAI-compatible vision transports share one action schema and one
+Local Ollama, Gemini and OpenAI-compatible transports share one action schema and one
 execution loop. No model-authored code or command strings are executed. A tool
 receipt is not goal verification; only caller-owned postconditions can verify
 compound goals. All imports of optional providers and Windows code are lazy.
@@ -114,11 +114,18 @@ class WorkerOutcome:
                 "final_observation": self.final_observation, "error": self.error}
 
 
+class _PlannerStopped(Exception):
+    def __init__(self, status, detail):
+        self.status, self.detail = status, detail
+        super().__init__(detail)
+
+
 class UniversalGUIWorker:
     def __init__(self, *, perception=None, actions=None, client=None, model=None,
                  api_key_env="GEMINI_API_KEY", confirmation=None, max_steps=20, provider=None,
                  openai_request=None, openai_key_env="OPENAI_API_KEY", openai_model=None,
-                 task_junction=None, action_policy=None, request_timeout=30.0, cancel_check=None):
+                 task_junction=None, action_policy=None, request_timeout=30.0, cancel_check=None,
+                 local_provider=None):
         self.perception = perception or DesktopPerception()
         self.actions = actions or DesktopActionLayer(self.perception)
         self.client, self.api_key_env, self.openai_key_env = client, api_key_env, openai_key_env
@@ -130,6 +137,11 @@ class UniversalGUIWorker:
         self.max_steps = max(1, min(int(max_steps), MAX_MODEL_STEPS))
         self.request_timeout = max(1.0, min(float(request_timeout), 60.0))
         self.cancel_check = cancel_check
+        self.local_provider = local_provider
+        self.local_model = None
+        self._local_selection = {}
+        self._local_perception_mode = None
+        self._local_native_controls = False
         self._active_context = self._active_junction = self._active_task_id = None
         self._decision_observation = None
         self._observations, self._history = [], []
@@ -144,13 +156,28 @@ class UniversalGUIWorker:
     def _select_provider(self):
         gemini = self.client is not None or bool(self._key(self.api_key_env))
         openai = self.openai_request is not None or bool(self._key(self.openai_key_env))
-        if self.provider not in {"auto", "gemini", "google", "openai", "chatgpt"}:
+        if self.provider not in {"auto", "local", "ollama", "gemini", "google", "openai", "chatgpt"}:
             return None, "Unsupported GUI provider selection; no fallback was attempted."
-        if self.provider in {"gemini", "google"} or self.provider == "auto" and gemini:
+        if self.provider in {"gemini", "google"} or self.provider == "auto" and self.client is not None:
             return ("gemini", None) if gemini else (None, f"Configure {self.api_key_env} locally.")
-        if self.provider in {"openai", "chatgpt"} or self.provider == "auto" and openai and self.api_key_env == "GEMINI_API_KEY":
+        if self.provider in {"openai", "chatgpt"} or self.provider == "auto" and self.openai_request is not None:
             return ("openai", None) if openai else (None, f"Configure {self.openai_key_env} locally.")
-        return None, f"Neither vision provider is configured: {self.api_key_env} or {self.openai_key_env}."
+        local_first = os.getenv("AEGIS_LOCAL_FIRST", "true").lower() in {"1", "true", "yes"}
+        if self.local_provider is None:
+            from core.model_gateway.local_provider import LocalProvider
+            self.local_provider = LocalProvider()
+        self._local_selection = self.local_provider.probe_desktop(timeout=min(1.5, self._timeout()))
+        if self._local_selection.get("status") == "AVAILABLE":
+            self.local_model = self._local_selection.get("model")
+            return "local", None
+        if self.provider == "auto" and not local_first:
+            if gemini:
+                return "gemini", None
+            if openai:
+                return "openai", None
+        # Local-first is a privacy boundary, not permission to send screen data
+        # to cloud services after a local error. Explicit cloud selection remains.
+        return None, "Local desktop inference unavailable; no cloud fallback was attempted."
 
     def _stop_status(self):
         context = self._active_context
@@ -211,7 +238,7 @@ class UniversalGUIWorker:
         self._active_junction = self.task_junction if self.task_junction is not None else task_junction
         self._observations, self._history = [], []
         self._verification_baseline = {}
-        self._active_junction.start(context, "universal_gui_worker", {"goal": goal, "model": self.model, "provider": self.provider})
+        self._active_junction.start(context, "universal_gui_worker", {"goal": goal, "requested_provider": self.provider})
         current = self._active_junction.get(context.task_id) or {}
         if current.get("status") in getattr(self._active_junction, "TERMINAL_STATUSES", ()):
             result = current.get("result")
@@ -248,6 +275,8 @@ class UniversalGUIWorker:
                         outcome = self._run(goal, status_callback)
                     else:
                         outcome = WorkerOutcome("BLOCKED", "Desktop lock unavailable.").to_dict()
+        except _PlannerStopped as exc:
+            outcome = self._outcome(exc.status, exc.detail, len(self._history))
         except Exception as exc:
             # Preserve actual attempt history even on a provider/action failure.
             outcome = WorkerOutcome("FAILED", "Universal task failed without retrying uncertain input.",
@@ -260,7 +289,7 @@ class UniversalGUIWorker:
             if acquired:
                 desktop_execution_lock.release(owner=owner)
         outcome.update({"task_id": context.task_id, "provider": self.provider,
-                        "model": self.openai_model if self.provider == "openai" else self.model,
+                         "model": self.local_model if self.provider == "local" else self.openai_model if self.provider == "openai" else self.model if self.provider == "gemini" else None,
                         "verification": self._verify(goal)})
         stop = self._stop_status()
         if stop:
@@ -333,6 +362,10 @@ class UniversalGUIWorker:
         except ValueError as exc:
             return {"status": "BLOCKED", "detail": str(exc), "recoverable": True}
         observation = self._decision_observation
+        if self.provider == "local" and self._local_perception_mode == "accessibility" and name in {"click_normalized", "move_normalized", "drag"}:
+            return {"status": "BLOCKED", "detail": "Text-only local planning requires native element IDs, not visual coordinates.", "recoverable": True}
+        if self.provider == "local" and self._local_perception_mode == "accessibility" and not self._local_native_controls and name in {"click_element", "type_text", "hotkey", "scroll"}:
+            return {"status": "BLOCKED", "detail": "Native window inventory permits window operations only; control input requires fresh UIA.", "recoverable": True}
         params = self._active_context.parameters if self._active_context else {}
         if params.get("desktop_allowed") is False:
             return {"status": "BLOCKED", "detail": "Desktop access denied."}
@@ -431,6 +464,10 @@ class UniversalGUIWorker:
         observation = self._observe()
         if observation.status != "SUCCESS":
             return self._outcome("UNAVAILABLE", observation.error or "Desktop capture unavailable.")
+        verification = self._verify(goal)
+        if verification["status"] == "VERIFIED":
+            self._event("verification_result", verification=verification, phase="before_planning")
+            return self._outcome("VERIFIED", "Goal already established by fresh independent evidence; no input needed.")
         self._neural_event(goal, provider, "started", "RUNNING")
         repeated = {}
         failure_count = 0
@@ -485,6 +522,11 @@ class UniversalGUIWorker:
             if failure_count >= 3:
                 return self._outcome("FAILED", "Bounded recovery budget exhausted.", step)
             observation = after
+            if status == "SUCCESS":
+                verification = self._verify(goal)
+                if verification["status"] == "VERIFIED":
+                    self._event("verification_result", verification=verification, phase="after_action")
+                    return self._outcome("VERIFIED", verification["reason"], step)
             # verify_goal is read-only and evaluated against caller-owned evidence.
             if name == "verify_goal" and result.get("status") == "VERIFIED":
                 return self._outcome("VERIFIED", result.get("reason", "Independent verification passed."), step)
@@ -541,6 +583,8 @@ class UniversalGUIWorker:
                     "feedback": e.get("recovery"), "state_changed": e.get("state_changed"),
                     "inventory": e.get("result") if e.get("action") in {"discover_applications", "list_windows", "verify_goal"} else None}
                    for e in self._history[-8:]]
+        if self.provider == "local":
+            return self._ask_local(goal, observation, params, history)
         prompt = json.dumps({"goal": goal, "original_goal": params.get("original_goal", goal),
             "current_step": params.get("current_step"), "verification_contract": params.get("verification"),
             "allowed_roots": params.get("allowed_roots", []), "current_observation": observation.to_dict(),
@@ -585,6 +629,83 @@ class UniversalGUIWorker:
                 args = None  # Fails validation; no argument guessing or coercion.
             calls.append({"name": function.get("name", ""), "args": args})
         return calls, str(message.get("content") or "")
+
+    def _ask_local(self, goal, observation, params, history):
+        """Use the existing local gateway, never execute generated code or prose."""
+        vision = self._local_selection.get("supports_vision") and bool(observation.image_b64)
+        native = [e for e in observation.elements if e.visible and e.source in {"uia", "fused"}]
+        self._local_native_controls = bool(native)
+        if not vision and not native and not (observation.window_id and observation.windows):
+            raise _PlannerStopped("UNAVAILABLE", "Local text planning requires fresh native accessibility controls; no visual grounding is available.")
+        self._local_perception_mode = "vision" if vision else "accessibility"
+        snapshot = observation.to_dict()
+        # Small installed models have bounded contexts. Never truncate JSON mid-
+        # token or resend thousands of UIA controls/large inventory histories.
+        snapshot["elements"] = [{k: e[k] for k in ("element_id", "text", "role", "bbox", "visible", "clickable", "source")}
+                                for e in snapshot["elements"] if e["visible"] and (vision or e["source"] in {"uia", "fused"})][:24]
+        for element in snapshot["elements"]:
+            element["text"] = element["text"][:120]
+        snapshot["windows"] = snapshot["windows"][:12]
+        snapshot.pop("manifest", None)
+        snapshot.pop("diagnostics", None)
+        progress = []
+        for entry in history[-4:]:
+            entry = dict(entry)
+            if isinstance(entry.get("inventory"), Mapping):
+                inventory = entry["inventory"]
+                entry["inventory"] = {key: inventory[key] for key in ("status", "detail", "reason") if key in inventory}
+                for key in ("items", "windows", "checks"):
+                    if isinstance(inventory.get(key), list):
+                        entry["inventory"][key] = inventory[key][:12]
+            progress.append(entry)
+        unavailable = {"click_normalized", "move_normalized", "drag"} if not vision else set()
+        if not vision and not native:
+            unavailable.update({"click_element", "type_text", "hotkey", "scroll"})
+        catalog = []
+        for tool in _tools():
+            if tool["name"] in unavailable:
+                continue
+            schema = tool["parameters"]
+            fields = []
+            for key, rule in schema["properties"].items():
+                if key == "expected_change":
+                    continue
+                kind = rule["type"]
+                if kind == "array":
+                    kind += "[" + rule["items"]["type"] + "]"
+                fields.append(key + ("" if key in schema["required"] else "?") + ":" + kind)
+            catalog.append(tool["name"] + "(" + ", ".join(fields) + ")")
+        system = (_SYSTEM + '\nReturn only one JSON object: {"action":{"name":"tool_name","args":{}}} '
+                  'or {"done":true}. Done is only a request for independent verification, not proof. '
+                  'Do not output Python, JavaScript, shell commands, markdown fences, or a list of actions. '
+                  'Optional args.expected_change explains the expected visible change. '
+                  'Available tools (? marks an optional argument):\n' + "\n".join(catalog))
+        prompt = json.dumps({"goal": goal, "original_goal": params.get("original_goal", goal),
+            "current_step": params.get("current_step"), "allowed_roots": params.get("allowed_roots", []),
+            "verification_contract": params.get("verification"), "current_observation": snapshot,
+            "progress": progress, "perception_mode": self._local_perception_mode}, ensure_ascii=False, default=str)
+        result = self.local_provider.plan_desktop(prompt, system, image_b64=observation.image_b64 if vision else "",
+            image_mime=observation.image_mime, timeout=self._timeout(), model=self.local_model,
+            cancel_check=lambda: bool(self._stop_status()))
+        status = result.get("status") if isinstance(result, Mapping) else "FAILED"
+        if status != "SUCCESS":
+            status = status if status in {"UNAVAILABLE", "CANCELLED", "TIMEOUT", "BLOCKED"} else "FAILED"
+            raise _PlannerStopped(status, "Local desktop planner stopped without executing further input.")
+        if result.get("perception_mode") != self._local_perception_mode or result.get("model") != self.local_model:
+            raise _PlannerStopped("UNAVAILABLE", "Local planner model or perception capability changed; no input sent.")
+        self._event("local_planner_result", provider="ollama", model=self.local_model,
+                    perception_mode=self._local_perception_mode, status="PLAN_GENERATED")
+        plan = result.get("response")
+        if not isinstance(plan, Mapping):
+            raise _PlannerStopped("FAILED", "Local planner returned no structured action.")
+        if set(plan) == {"done"} and plan["done"] is True:
+            return [], ""
+        action = plan.get("action")
+        self._event("local_plan_shape", keys=sorted(str(k) for k in plan),
+                    action_type=type(action).__name__)
+        if set(plan) != {"action"} or not isinstance(action, Mapping) or set(action) != {"name", "args"}:
+            raise _PlannerStopped("FAILED", "Local planner returned an invalid single-action contract.")
+        return [{"name": action["name"], "args": action["args"]}], ""
 
 
 __all__ = ["UniversalGUIWorker", "WorkerOutcome"]
