@@ -390,6 +390,18 @@ class UniversalGUIWorker:
                 return {"status": "BLOCKED", "detail": "Credential controls require direct operator input."}
             if name in {"type_text", "hotkey"} and _EXECUTION_CONTEXT.search(observation.active_window + " " + observation.active_process):
                 return {"status": "BLOCKED", "detail": "Input into command/credential/system execution contexts is not permitted."}
+            if name == "type_text" and self._active_context is not None:
+                create_document_goal = re.search(
+                    r"\b(?:create|new|save\s+as|reopen|close)\b", self._active_context.goal, re.I
+                )
+                existing_document = re.search(
+                    r"\.[A-Za-z0-9]{1,8}(?:\s+-|$)", observation.active_window or "", re.I
+                )
+                if (create_document_goal and existing_document and
+                        self._active_context.parameters.get("allow_existing_document_input") is not True):
+                    return {"status": "BLOCKED",
+                            "detail": "Creating or reopening a document requires a fresh/untitled editor or explicit host authorization for an existing document.",
+                            "recoverable": True}
             target_label = ""
             if name == "click_element":
                 resolver = getattr(self.actions, "_find_element", None)

@@ -74,15 +74,19 @@ Focused offline command:
 python -m pytest -q tests/test_circuit_breaker.py tests/test_local_desktop_provider.py tests/test_local_desktop_worker.py tests/test_storage_task_lookup.py tests/test_universal_gui_worker.py tests/test_universal_runtime_safety.py tests/test_universal_desktop_layer.py tests/test_multimodal_runtime.py tests/test_verification_planner.py tests/test_shared_task_junction.py
 ```
 
-- **190 tests passed in 44.11 seconds.** HTTP/provider/input tests use mocks; GUI
+- **191 tests passed in 39.02 seconds.** HTTP/provider/input tests use mocks; GUI
   tests are not claimed as live multi-application acceptance.
 - Live `aegis-sovereign:latest` inference returned the requested valid action
   JSON from a synthetic native-control prompt. No desktop action was sent by
   that inference smoke check.
 - Live Moondream metadata advertised vision, but synthetic-image generation
   failed its bounded request. No working Moondream vision inference is claimed.
-- A read-only native perception check returned in **1.25 seconds**, explicitly
-  reporting the UIA timeout rather than waiting indefinitely or inventing controls.
+- Native UIA initially appeared unavailable because a real bounded traversal of
+  the active Windows tree takes about **13.78 seconds** and returns roughly
+  3,084 controls on this machine. The default bounded read budget is now 15
+  seconds (hard cap 20), still with one outstanding daemon scan and late-result
+  discard. This is a latency tradeoff, not an unbounded wait; control actions
+  still require a fresh successful scan.
 - An earlier guarded GUI attempt timed out. The runner was confirmed absent,
   cancellation was persisted after the task-lookup repair, and its action effect
   remains UNVERIFIED. No automatic replay was made while that runner was uncertain.
@@ -94,6 +98,17 @@ python -m pytest -q tests/test_circuit_breaker.py tests/test_local_desktop_provi
   Calculator with **zero inputs**, proving the fresh independent state check.
   It does not pretend a new model invocation or application launch happened in
   that read-only run.
+- The real document save/reopen attempt is **not verified**. The first run
+  stopped before input because the default vision model was unavailable. The
+  explicit local-text run generated one invalid placeholder action, then typed
+  into the already-focused existing Notepad document before the mission failed.
+  A fresh observation identified that document and a single bounded Ctrl+Z
+  reversed that known type action; the document was not saved or closed by
+  AEGIS. A new guard now blocks `type_text` for create/save/reopen goals while
+  an existing filename is focused unless the host explicitly sets
+  `allow_existing_document_input`. The intended workflow remains pending until
+  it starts from a fresh/untitled editor and the local model produces a valid
+  bounded sequence.
 - Subsequent bounded local-model window acceptance through the canonical
   TaskEngine path verified four application categories: Notepad (text editor,
   task `69751a65-dee8-48e4-98b7-d2e16bddabc3`), Calculator (calculator,

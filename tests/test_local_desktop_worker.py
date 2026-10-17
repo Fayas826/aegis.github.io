@@ -220,6 +220,19 @@ def test_goal_preflight_seeds_real_inventory_without_desktop_input(junction):
     assert screen.inputs == []
 
 
+def test_document_goal_cannot_type_into_existing_user_document_without_host_authority(junction):
+    screen = Screen()
+    screen.observe = lambda: DesktopObservation("SUCCESS", 120, 90, active_window="existing.txt - Notepad",
+        active_process="notepad.exe", window_id=12,
+        elements=(DesktopElement("doc", "Text editor", "DocumentControl", (1, 1, 100, 80), source="uia"),))
+    local = Local([{"action": {"name": "type_text", "args": {"text": "unsafe"}}}, {"done": True}], vision=False)
+    result = make_worker(junction, local, screen).run_task("Create a new note, save as new.txt, and reopen it")
+    assert result["status"] == "UNVERIFIED"
+    assert result["actions"][0]["result"]["status"] == "BLOCKED"
+    assert "fresh/untitled" in result["actions"][0]["result"]["detail"]
+    assert screen.inputs == []
+
+
 def test_hung_native_uia_read_is_bounded_and_never_reused(monkeypatch):
     import core.perception.universal_desktop_layer as module
     with module._UIA_SCAN_LOCK:

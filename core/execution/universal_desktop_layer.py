@@ -528,7 +528,7 @@ class DesktopActionLayer:
             return self._result(action, BLOCKED, reason, before)
         if needs_driver and self._driver() is None:
             return self._result(action, UNAVAILABLE, "desktop input backend unavailable", before)
-        current = self._fresh()
+        current = self._fresh() if self._bound is not None else before
         reason = self._stale(current, expected, pixel_exact, controls_exact)
         if not reason and validate:
             try:
@@ -886,21 +886,25 @@ class DesktopActionLayer:
                 except Exception:
                     pass
             if len(matches) > 1:
+                titles = [w for w in matches if w.get("title") and w["title"].strip() and w["title"].strip().casefold() != "popuphost"]
+                if titles:
+                    matches = titles
+            if len(matches) > 1:
+                exact_title = [w for w in matches if w.get("title", "").strip().casefold() == str(target).strip().casefold()]
+                if exact_title:
+                    matches = exact_title
+            if len(matches) > 1:
                 visible = [w for w in matches if w.get("visible", True) and not w.get("minimized", False) and
                            (w.get("bounds", (0, 0, 0, 0))[2] - w.get("bounds", (0, 0, 0, 0))[0]) > 20 and
                            (w.get("bounds", (0, 0, 0, 0))[3] - w.get("bounds", (0, 0, 0, 0))[1]) > 20]
-                if len(visible) == 1:
+                if visible:
                     matches = visible
-                elif len(visible) > 1:
-                    frames = [w for w in visible if str(w.get("process", "")).casefold() == "applicationframehost.exe"]
-                    if len(frames) == 1:
-                        matches = frames
-                    else:
-                        matches = visible
-                elif len(matches) > 1:
-                    frames = [w for w in matches if str(w.get("process", "")).casefold() == "applicationframehost.exe"]
-                    if len(frames) == 1:
-                        matches = frames
+            if len(matches) > 1:
+                frames = [w for w in matches if str(w.get("process", "")).casefold() == "applicationframehost.exe"]
+                if frames:
+                    matches = frames
+            if len(matches) > 1:
+                matches = [matches[0]]
             if len(matches) != 1:
                 return "window target is absent or ambiguous; use an exact window_id"
             window = matches[0]

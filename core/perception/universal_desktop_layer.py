@@ -586,7 +586,7 @@ _UIA_SCAN_LOCK = threading.Lock()
 _UIA_SCAN_PENDING = None
 
 
-def _bounded_default_uia(window_id: int = 0, timeout: float = 5.0) -> tuple[Sequence[Any], Optional[str]]:
+def _bounded_default_uia(window_id: int = 0, timeout: float = 15.0) -> tuple[Sequence[Any], Optional[str]]:
     """A hung read-only COM call must not trap the desktop action thread.
 
     At most one native scan can be outstanding. Timed-out results are discarded,
@@ -594,6 +594,7 @@ def _bounded_default_uia(window_id: int = 0, timeout: float = 5.0) -> tuple[Sequ
     daemon reader may remain blocked, but no new reader/input threads accumulate.
     """
     global _UIA_SCAN_PENDING
+    timeout = min(20.0, max(0.05, float(timeout)))
     request = {"done": threading.Event(), "result": ((), "UIA read unavailable")}
     with _UIA_SCAN_LOCK:
         if _UIA_SCAN_PENDING is not None and not _UIA_SCAN_PENDING.get("done", threading.Event()).is_set():
