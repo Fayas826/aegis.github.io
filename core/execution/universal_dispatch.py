@@ -22,12 +22,31 @@ UNIVERSAL_ACTION_TYPES = frozenset({
     "WEB_EXECUTION",
 })
 
+NON_SUCCESS_STATUSES = frozenset({
+    "FAILED", "BLOCKED", "UNAVAILABLE", "UNVERIFIED", "VERIFICATION_FAILED",
+    "CANCELLED", "TIMEOUT", "ERROR", "SAFETY_BLOCK", "SAFETY_BLOCKED",
+})
+
 
 def universal_mode(payload: Optional[Mapping[str, Any]]) -> str:
     """Return the explicit mode, defaulting safely to universal."""
 
     value = str((payload or {}).get("execution_mode", "universal") or "universal").strip().lower()
     return value if value in {"universal", "legacy"} else "universal"
+
+
+def result_is_success(result: Any) -> bool:
+    """Accept only a real success, never a failed nested verification."""
+
+    if not isinstance(result, Mapping):
+        return False
+    status = str(result.get("status", "")).strip().upper()
+    verification = str(result.get("verification_status", "")).strip().upper()
+    if status not in {"SUCCESS", "VERIFIED"}:
+        return False
+    if verification and verification not in {"SUCCESS", "VERIFIED", "VERIFIED_VALID"}:
+        return False
+    return True
 
 
 def goal_for_action(action_type: str, payload: Optional[Mapping[str, Any]] = None,
@@ -65,4 +84,7 @@ async def execute_universal_goal(goal: str, *, runtime: Any = None,
     return await runtime.execute_goal(goal, surface=surface)
 
 
-__all__ = ["UNIVERSAL_ACTION_TYPES", "execute_universal_goal", "goal_for_action", "universal_mode"]
+__all__ = [
+    "NON_SUCCESS_STATUSES", "UNIVERSAL_ACTION_TYPES", "execute_universal_goal",
+    "goal_for_action", "result_is_success", "universal_mode",
+]

@@ -187,12 +187,19 @@ class ToolRegistry:
                 )
 
             duration_ms = (time.time() - start_time) * 1000
+            final_status = "SUCCESS"
+            if isinstance(result_data, dict) and str(result_data.get("status", "")).upper() in {
+                "FAILED", "ERROR", "BLOCKED", "UNAVAILABLE", "UNVERIFIED",
+                "VERIFICATION_FAILED", "TIMEOUT", "CANCELLED", "SAFETY_BLOCK",
+            }:
+                final_status = result_data["status"]
+            evidence = {"validated_args": list(validated_kwargs.keys())}
             return ToolResult(
                 tool_id=tool_id,
-                status="SUCCESS",
+                status=final_status,
                 data=result_data,
                 duration_ms=duration_ms,
-                evidence={"validated_args": list(validated_kwargs.keys())},
+                evidence=evidence,
             )
 
         except asyncio.TimeoutError:
@@ -310,6 +317,29 @@ class ToolRegistry:
 
             class InspectScreenSchema(BaseModel):
                 focus_target: str = Field("", description="Optional window or app to inspect")
+            class UniversalDesktopGoalSchema(BaseModel):
+                goal: str = Field(..., min_length=1, max_length=4000, description="Concrete desktop or application GUI goal")
+                surface: Optional[str] = Field(None, description="Optional execution surface: desktop or browser")
+
+            async def execute_universal_desktop_goal(goal: str, surface: Optional[str] = None):
+                from core.execution.universal_dispatch import execute_universal_goal
+
+                return await execute_universal_goal(goal, surface=surface)
+
+            self.register(ToolDefinition(
+                tool_id="desktop.universal_goal",
+                description=(
+                    "Execute a desktop or application goal through the universal "
+                    "observe-plan-act-verify runtime with fresh observations."
+                ),
+                input_schema=UniversalDesktopGoalSchema,
+                handler=execute_universal_desktop_goal,
+                risk_level="MODERATE",
+                timeout_seconds=120,
+                capability="desktop",
+                verification_strategy="fresh_observation_and_worker_verification",
+            ))
+
 
             self.register(ToolDefinition(
                 tool_id="screen.inspect",

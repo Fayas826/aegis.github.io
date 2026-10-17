@@ -1,5 +1,10 @@
 from core.execution.universal_desktop_layer import DesktopActionLayer
-from core.execution.universal_dispatch import execute_universal_goal, goal_for_action, universal_mode
+from core.execution.universal_dispatch import (
+    execute_universal_goal,
+    goal_for_action,
+    result_is_success,
+    universal_mode,
+)
 from core.perception.universal_desktop_layer import (
     BLOCKED,
     SUCCESS,
@@ -78,6 +83,15 @@ def test_universal_dispatch_defaults_and_supports_legacy_mode():
     assert goal_for_action("APP_OPEN", {"app_name": "Notepad"}) == "Open Notepad"
 
 
+def test_nested_failure_statuses_cannot_be_promoted_to_success():
+    assert result_is_success({"status": "SUCCESS"}) is True
+    assert result_is_success({"status": "VERIFIED", "verification_status": "VERIFIED"}) is True
+    for status in ("FAILED", "BLOCKED", "UNAVAILABLE", "UNVERIFIED", "VERIFICATION_FAILED"):
+        assert result_is_success({"status": "SUCCESS", "verification_status": status}) is False
+        assert result_is_success({"status": status}) is False
+    assert result_is_success({"status": "SUCCESS", "verification_status": "UNKNOWN"}) is False
+
+
 def test_universal_dispatch_uses_injected_runtime():
     class Runtime:
         async def execute_goal(self, goal, surface=None):
@@ -94,7 +108,7 @@ def test_universal_dispatch_uses_injected_runtime():
 
 
 def test_task_engine_defaults_to_universal_and_preserves_legacy_opt_out(monkeypatch):
-    from core.orchestration.task_engine import TaskEngine, TaskStep
+    from core.orchestration.task_engine import Task, TaskEngine, TaskStep
     import core.orchestration.task_engine as task_engine_module
 
     calls = []
@@ -112,7 +126,85 @@ def test_task_engine_defaults_to_universal_and_preserves_legacy_opt_out(monkeypa
     engine.controller = legacy
 
     import asyncio
-    asyncio.run(engine._dispatch_step(TaskStep(action_type="APP_OPEN", payload={"app_name": "Notepad"})))
-    asyncio.run(engine._dispatch_step(TaskStep(action_type="APP_OPEN", payload={"app_name": "Notepad", "execution_mode": "legacy"})))
-    assert calls[0] == ("universal", "Open Notepad", None)
+    task = Task(original_intent="Open the editor and prepare it")
+    asyncio.run(engine._dispatch_step(task, TaskStep(action_type="APP_OPEN", payload={"app_name": "Notepad"})))
+    asyncio.run(engine._dispatch_step(task, TaskStep(action_type="APP_OPEN", payload={"app_name": "Notepad", "execution_mode": "legacy"})))
+    assert calls[0] == ("universal", "Open the editor and prepare it\nCurrent step: Open Notepad", None)
     assert calls[1][0] == "legacy"
+
+
+def test_chatgpt_provider_uses_bounded_actions_and_fresh_observations():
+    from core.runtime.universal_gui_worker import UniversalGUIWorker
+
+    class Perception:
+        def observe(self):
+            return DesktopObservation(SUCCESS, width=100, height=80, image_b64="", active_window="Editor")
+
+    class ActionResult:
+        status = SUCCESS
+        detail = "clicked"
+        error = None
+
+        def to_dict(self):
+            return {"status": self.status, "detail": self.detail}
+
+    class Actions:
+        def click_normalized(self, x, y):
+            self.last = (x, y)
+            return ActionResult()
+
+    responses = iter([
+        {"choices": [{"message": {"role": "assistant", "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "click_normalized", "arguments": '{"x": 500, "y": 500}'}}]}}]},
+        {"choices": [{"message": {"role": "assistant", "content": "I cannot independently verify the requested goal."}}]},
+    ])
+    worker = UniversalGUIWorker(
+        perception=Perception(), actions=Actions(), provider="chatgpt",
+        openai_request=lambda payload: next(responses), max_steps=2,
+    )
+    result = worker.run_task("click the editor")
+    assert result["status"] == "UNVERIFIED"
+    assert result["verification_status"] == "UNVERIFIED"
+    assert len(result["actions"]) == 1
+    assert len(result["observations"]) == 2
+
+
+def test_canonical_tool_registry_exposes_universal_goal():
+    from core.tool_registry.registry import tool_registry
+
+    assert tool_registry.has_tool("desktop.universal_goal")
+
+
+def test_universal_worker_honors_cancelled_task_context_and_junction_evidence():
+    from core.orchestration.agent_contract import TaskContext
+    from core.runtime.universal_gui_worker import UniversalGUIWorker
+
+    class Perception:
+        def observe(self):
+            return DesktopObservation(SUCCESS, width=20, height=20, active_window="Editor")
+
+    class Junction:
+        def __init__(self):
+            self.completed = None
+
+        def start(self, context, agent, parameters):
+            return {"task_id": context.task_id}
+
+        def get(self, task_id):
+            return {"status": "RUNNING"}
+
+        def record_event(self, *args, **kwargs):
+            return {}
+
+        def complete(self, task_id, status, result, evidence):
+            self.completed = (status, evidence)
+
+    junction = Junction()
+    context = TaskContext(goal="type text", cancelled=True)
+    worker = UniversalGUIWorker(
+        perception=Perception(), provider="chatgpt", openai_request=lambda payload: {},
+        task_junction=junction,
+    )
+    result = worker.run_task("type text", task_context=context)
+    assert result["status"] == "CANCELLED"
+    assert junction.completed[0] == "CANCELLED"
+    assert "observations" in junction.completed[1]

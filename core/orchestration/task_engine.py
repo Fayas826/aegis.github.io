@@ -14,6 +14,7 @@ from core.execution.universal_dispatch import (
     UNIVERSAL_ACTION_TYPES,
     execute_universal_goal,
     goal_for_action,
+    result_is_success,
     universal_mode,
 )
 
@@ -103,9 +104,9 @@ class TaskEngine:
                     else:
                         raise Exception(f"Skill not found: {skill_name}")
                 else:
-                    result = await self._dispatch_step(step)
+                    result = await self._dispatch_step(task, step)
                 
-                if result.get("status") in {"SUCCESS", "VERIFIED"}:
+                if result_is_success(result):
                     step.status = "SUCCESS"
                     step.result = result
                     step.ended_at = time.time()
@@ -122,7 +123,7 @@ class TaskEngine:
                 await asyncio.sleep(1)
         return False
 
-    async def _dispatch_step(self, step: TaskStep) -> Dict:
+    async def _dispatch_step(self, task: Task, step: TaskStep) -> Dict:
         """Use universal execution by default, with a per-step legacy escape hatch.
 
         The old controller remains intact and is selected with
@@ -133,6 +134,8 @@ class TaskEngine:
         if step.action_type in UNIVERSAL_ACTION_TYPES and universal_mode(step.payload) != "legacy":
             surface = step.payload.get("surface") if isinstance(step.payload, dict) else None
             goal = goal_for_action(step.action_type, step.payload, step.description)
+            if task.original_intent and task.original_intent.strip() and task.original_intent.strip() != goal:
+                goal = f"{task.original_intent.strip()}\nCurrent step: {goal}"
             return await execute_universal_goal(goal, surface=surface)
         return await self.controller(step.action_type, step.payload)
 
