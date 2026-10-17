@@ -369,6 +369,16 @@ class UniversalGUIWorker:
         params = self._active_context.parameters if self._active_context else {}
         if params.get("desktop_allowed") is False:
             return {"status": "BLOCKED", "detail": "Desktop access denied."}
+        if name in {"type_text", "paste_text"}:
+            repeated_input = any(
+                entry.get("action") == name and entry.get("arguments") == args and
+                (entry.get("result") or {}).get("status") == "SUCCESS"
+                for entry in self._history
+            )
+            if repeated_input:
+                return {"status": "BLOCKED",
+                        "detail": "This exact text input already succeeded; repeating it could duplicate user data.",
+                        "recoverable": True}
         read_only = {"verify_goal", "discover_applications", "list_windows", "wait"}
         if name == "verify_goal":
             return self._verify(self._active_context.goal if self._active_context else "")

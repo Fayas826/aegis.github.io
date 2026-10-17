@@ -46,6 +46,9 @@ class Screen:
         self.inputs.append(args)
         self.label = "Selected"
 
+    def hotkey(self, *args):
+        self.inputs.append(("hotkey", args))
+
 
 @pytest.fixture
 def junction(tmp_path, monkeypatch):
@@ -231,6 +234,17 @@ def test_document_goal_cannot_type_into_existing_user_document_without_host_auth
     assert result["actions"][0]["result"]["status"] == "BLOCKED"
     assert "fresh/untitled" in result["actions"][0]["result"]["detail"]
     assert screen.inputs == []
+
+
+def test_exact_successful_text_input_is_not_replayed(junction):
+    screen = Screen()
+    local = Local([{"action": {"name": "type_text", "args": {"text": "once"}}},
+                   {"action": {"name": "type_text", "args": {"text": "once"}}},
+                   {"done": True}])
+    result = make_worker(junction, local, screen).run_task("Type once in the fresh editor")
+    assert result["status"] == "UNVERIFIED"
+    assert len(result["actions"]) == 2
+    assert result["actions"][1]["result"]["status"] == "BLOCKED"
 
 
 def test_hung_native_uia_read_is_bounded_and_never_reused(monkeypatch):

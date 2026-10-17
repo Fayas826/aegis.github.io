@@ -74,7 +74,7 @@ Focused offline command:
 python -m pytest -q tests/test_circuit_breaker.py tests/test_local_desktop_provider.py tests/test_local_desktop_worker.py tests/test_storage_task_lookup.py tests/test_universal_gui_worker.py tests/test_universal_runtime_safety.py tests/test_universal_desktop_layer.py tests/test_multimodal_runtime.py tests/test_verification_planner.py tests/test_shared_task_junction.py
 ```
 
-- **191 tests passed in 39.02 seconds.** HTTP/provider/input tests use mocks; GUI
+- **192 tests passed in 32.41 seconds.** HTTP/provider/input tests use mocks; GUI
   tests are not claimed as live multi-application acceptance.
 - Live `aegis-sovereign:latest` inference returned the requested valid action
   JSON from a synthetic native-control prompt. No desktop action was sent by
@@ -109,6 +109,9 @@ python -m pytest -q tests/test_circuit_breaker.py tests/test_local_desktop_provi
   `allow_existing_document_input`. The intended workflow remains pending until
   it starts from a fresh/untitled editor and the local model produces a valid
   bounded sequence.
+- A second regression now blocks replay of an identical successful text input,
+  so a planner that repeats a paste cannot duplicate user data while it is
+  recovering.
 - Subsequent bounded local-model window acceptance through the canonical
   TaskEngine path verified four application categories: Notepad (text editor,
   task `69751a65-dee8-48e4-98b7-d2e16bddabc3`), Calculator (calculator,
