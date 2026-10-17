@@ -374,6 +374,135 @@ class VerificationPlanner:
     def verify(goal: str, observation: Optional[Observation] = None, **kwargs: Any) -> VerificationOutcome:
         return verify_goal(goal, observation, **kwargs)
 
+    @staticmethod
+    def desktop_baseline(contract: Optional[Mapping[str, Any]], allowed_roots: Sequence[str] = ()) -> dict[str, Any]:
+        """Capture bounded authorized file identities before any desktop effects."""
+        import hashlib
+        from pathlib import Path
+
+        baseline = {}
+        predicates = contract.get("predicates", []) if isinstance(contract, Mapping) else []
+        if not isinstance(predicates, (list, tuple)):
+            return baseline
+        for predicate in predicates[:12]:
+            if not isinstance(predicate, Mapping) or predicate.get("kind") != "file_exact":
+                continue
+            try:
+                path = Path(str(predicate["path"])).resolve()
+                if not any(path.is_relative_to(Path(root).resolve()) for root in allowed_roots):
+                    continue
+                if not path.exists():
+                    baseline[str(path)] = {"exists": False}
+                    continue
+                with path.open("rb") as stream:
+                    raw = stream.read(1024 * 1024 + 1)
+                if len(raw) > 1024 * 1024:
+                    continue
+                baseline[str(path)] = {"exists": True, "sha256": hashlib.sha256(raw).hexdigest(),
+                                       "mtime_ns": path.stat().st_mtime_ns}
+            except (OSError, ValueError, TypeError, KeyError):
+                continue
+        return baseline
+
+    @staticmethod
+    def verify_desktop(goal: str, observations: Sequence[Mapping[str, Any]],
+                       contract: Optional[Mapping[str, Any]] = None,
+                       allowed_roots: Sequence[str] = (), *, baseline: Optional[Mapping[str, Any]] = None) -> dict[str, Any]:
+        """Verify caller-owned desktop predicates, never model-declared completion.
+
+        This is application-independent: window identity, exact named control
+        text, or bounded file readback. File predicates require explicit allowed
+        roots. A requested close/reopen requires observed disappearance and
+        reappearance of the document title after it was first visible.
+        """
+        import hashlib
+        from pathlib import Path
+
+        latest = observations[-1] if observations else {}
+        evidence: dict[str, Any] = {"method": "desktop_postconditions", "checks": []}
+        if (latest.get("status") != "SUCCESS" or
+                not isinstance(latest.get("timestamp"), (int, float)) or
+                not -1 <= time.time() - latest["timestamp"] <= 30):
+            return {"status": "UNVERIFIED", "reason": "Fresh successful desktop evidence required.", **evidence}
+        if contract is not None and not isinstance(contract, Mapping):
+            return {"status": "UNVERIFIED", "reason": "Invalid desktop verification contract.", **evidence}
+        predicates = (contract or {}).get("predicates", [])
+        # Only a strictly simple launch goal may use window evidence alone.
+        if not predicates:
+            match = re.fullmatch(r"\s*(?:open|launch|start)\s+(?:the\s+)?([\w .()'-]{1,100})\s*", goal, re.I)
+            target = match.group(1).strip() if match else ""
+            if not target or re.search(r"\b(?:and|then|type|save|close|reopen|verify|write|calculate|file)\b", target, re.I):
+                return {"status": "UNVERIFIED", "reason": "No caller-supplied independent postconditions for this compound goal.", **evidence}
+            predicates = [{"kind": "window", "value": re.sub(r"\s+(app|application)$", "", target, flags=re.I)}]
+        if not isinstance(predicates, (list, tuple)) or not 1 <= len(predicates) <= 12:
+            return {"status": "UNVERIFIED", "reason": "Invalid desktop verification contract.", **evidence}
+        matched = []
+        for predicate in predicates:
+            if not isinstance(predicate, Mapping):
+                matched.append(False)
+                continue
+            kind, value = predicate.get("kind"), predicate.get("value", "")
+            ok, detail = False, {}
+            if kind == "window" and isinstance(value, str) and value.strip():
+                target = value.casefold().removesuffix(".exe")
+                title = str(latest.get("active_window", "")).casefold()
+                process = str(latest.get("active_process", "")).casefold().removesuffix(".exe")
+                ok = process == target or title == target or title.endswith(" - " + target) or title.startswith(target + " - ")
+                detail = {"window_id": latest.get("window_id"), "title": latest.get("active_window")}
+            elif kind == "control_text" and isinstance(value, str) and value:
+                # Exact UIA label/state only, not VLM guesses or arbitrary text.
+                ok = any(e.get("source") in {"uia", "fused"} and e.get("visible") and
+                         e.get("text") == value and
+                         (not predicate.get("element_id") or e.get("element_id") == predicate["element_id"])
+                         for e in latest.get("elements", []) if isinstance(e, Mapping))
+                detail = {"expected": value, "source": "fresh_accessibility"}
+            elif kind == "file_exact":
+                try:
+                    path = Path(str(predicate["path"])).resolve()
+                    roots = [Path(root).resolve() for root in allowed_roots]
+                    if not roots or not any(path.is_relative_to(root) for root in roots):
+                        raise ValueError("File verification path is outside authorized roots")
+                    if not isinstance(value, str) or path.stat().st_size > 1024 * 1024:
+                        raise ValueError("Readback must be bounded UTF-8 text")
+                    with path.open("rb") as stream:
+                        raw = stream.read(1024 * 1024 + 1)
+                    if len(raw) > 1024 * 1024:
+                        raise ValueError("Readback exceeded bounded size")
+                    actual = raw.decode("utf-8-sig")
+                    ok = actual == value
+                    detail = {"path": str(path), "sha256": hashlib.sha256(raw).hexdigest(), "bytes": len(raw), "method": "independent_file_readback"}
+                    if predicate.get("require_changed", True):
+                        previous = (baseline or {}).get(str(path))
+                        changed = previous is not None and (not previous.get("exists") or
+                            previous.get("sha256") != detail["sha256"] or previous.get("mtime_ns") != path.stat().st_mtime_ns)
+                        ok = ok and changed
+                        detail["changed_since_start"] = changed
+                    if predicate.get("require_reopen"):
+                        phase = 0
+                        for item in observations:
+                            if item.get("status") != "SUCCESS":
+                                continue
+                            present = path.name.casefold() in str(item.get("active_window", "")).casefold()
+                            inventory = item.get("windows")
+                            still_open = (not isinstance(inventory, list) or not inventory or any(
+                                path.name.casefold() in str(window.get("title", "")).casefold()
+                                for window in inventory if isinstance(window, Mapping)))
+                            if phase == 0 and present:
+                                phase = 1
+                            elif phase == 1 and not present and not still_open:
+                                phase = 2
+                            elif phase == 2 and present:
+                                phase = 3
+                        ok = ok and phase == 3
+                        detail["reopen_observed"] = phase == 3
+                except (OSError, ValueError, KeyError, TypeError) as exc:
+                    detail = {"error": str(exc)}
+            matched.append(ok)
+            evidence["checks"].append({"kind": kind, "matched": ok, **detail})
+        verified = bool(matched) and all(matched)
+        return {"status": "VERIFIED" if verified else "UNVERIFIED",
+                "reason": "All independent desktop postconditions matched." if verified else "Desktop postconditions are not yet established.", **evidence}
+
 
 # Familiar alias for integrations that already use this naming convention.
 VerificationStatus = OutcomeStatus

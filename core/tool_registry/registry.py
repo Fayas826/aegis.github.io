@@ -188,9 +188,15 @@ class ToolRegistry:
 
             duration_ms = (time.time() - start_time) * 1000
             final_status = "SUCCESS"
-            if isinstance(result_data, dict) and str(result_data.get("status", "")).upper() in {
+            if tool_id == "desktop.universal_goal":
+                from core.execution.universal_dispatch import execution_status
+                final_status = execution_status(result_data)
+                if final_status == "VERIFIED":
+                    final_status = "SUCCESS"  # Registry execution success; verified evidence stays in data.
+            elif isinstance(result_data, dict) and str(result_data.get("status", "")).upper() in {
                 "FAILED", "ERROR", "BLOCKED", "UNAVAILABLE", "UNVERIFIED",
                 "VERIFICATION_FAILED", "TIMEOUT", "CANCELLED", "SAFETY_BLOCK",
+                "PENDING_CONFIRMATION", "PERMISSION_REQUIRED", "CLARIFICATION_REQUIRED",
             }:
                 final_status = result_data["status"]
             evidence = {"validated_args": list(validated_kwargs.keys())}

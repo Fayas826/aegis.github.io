@@ -113,7 +113,9 @@ def test_task_engine_defaults_to_universal_and_preserves_legacy_opt_out(monkeypa
 
     calls = []
 
-    async def universal(goal, *, surface=None):
+    async def universal(goal, *, surface=None, task_context=None, runtime=None):
+        assert task_context.parameters["original_goal"] == "Open the editor and prepare it"
+        assert task_context.goal == "Open Notepad"
         calls.append(("universal", goal, surface))
         return {"status": "VERIFIED", "goal": goal}
 
@@ -129,7 +131,7 @@ def test_task_engine_defaults_to_universal_and_preserves_legacy_opt_out(monkeypa
     task = Task(original_intent="Open the editor and prepare it")
     asyncio.run(engine._dispatch_step(task, TaskStep(action_type="APP_OPEN", payload={"app_name": "Notepad"})))
     asyncio.run(engine._dispatch_step(task, TaskStep(action_type="APP_OPEN", payload={"app_name": "Notepad", "execution_mode": "legacy"})))
-    assert calls[0] == ("universal", "Open the editor and prepare it\nCurrent step: Open Notepad", None)
+    assert calls[0] == ("universal", "Open Notepad", None)
     assert calls[1][0] == "legacy"
 
 

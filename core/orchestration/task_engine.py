@@ -15,6 +15,7 @@ from core.execution.universal_dispatch import (
     execute_universal_goal,
     goal_for_action,
     result_is_success,
+    execution_status,
     universal_mode,
 )
 
@@ -47,8 +48,9 @@ class Task:
 class TaskEngine:
     """🚀 O.M.E.G.A. TASK_ENGINE: Intelligent Execution & Rollback Layer."""
     
-    def __init__(self, controller_callback: Callable):
+    def __init__(self, controller_callback: Callable, universal_runtime=None):
         self.controller = controller_callback
+        self.universal_runtime = universal_runtime
         self.active_tasks: Dict[str, Task] = {}
         self.history_path = str(TASK_HISTORY_PATH)
         os.makedirs(os.path.dirname(self.history_path), exist_ok=True)
@@ -67,14 +69,18 @@ class TaskEngine:
             if success:
                 executed_steps.append(step)
             else:
-                task.status = "FAILED"
-                print("[TASK_ENGINE] Task FAILED. Initiating rollback...")
-                reliability_engine.analyze_failure(
-                    "TASK_ENGINE",
-                    step.error or "STEP_EXECUTION_FAILED",
-                    {"task_id": task.task_id, "step": step.description, "action_type": step.action_type},
-                )
-                await self._rollback_task(executed_steps)
+                task.status = step.status if step.status not in {"SUCCESS", "EXECUTING", "PENDING"} else "FAILED"
+                print(f"[TASK_ENGINE] Task ended with {task.status}.")
+                # Pauses/cancellation are not failures to auto-heal. Failed
+                # desktop receipts may be uncertain effects; never run legacy
+                # healing/rollback against changed UI state.
+                if task.status == "FAILED" and (step.action_type.upper() not in UNIVERSAL_ACTION_TYPES or universal_mode(step.payload) == "legacy"):
+                    reliability_engine.analyze_failure(
+                        "TASK_ENGINE",
+                        step.error or "STEP_EXECUTION_FAILED",
+                        {"task_id": task.task_id, "step": step.description, "action_type": step.action_type},
+                    )
+                    await self._rollback_task(executed_steps)
                 break
         else:
             task.status = "SUCCESS"
@@ -92,8 +98,16 @@ class TaskEngine:
 
         step.status = "EXECUTING"
         step.started_at = time.time()
+        is_universal = step.action_type.upper() in UNIVERSAL_ACTION_TYPES and universal_mode(step.payload) != "legacy"
         
         while step.retry_count <= step.max_retries:
+            if task.status == "CANCELLED" or task.context.get("cancelled"):
+                step.status, step.error = "CANCELLED", "Task cancelled before input."
+                return False
+            deadline = task.context.get("deadline")
+            if deadline is not None and time.time() >= float(deadline):
+                step.status, step.error = "TIMEOUT", "Task deadline elapsed."
+                return False
             try:
                 # 🧩 SKILL INTEGRATION
                 if step.action_type == "SKILL":
@@ -106,15 +120,24 @@ class TaskEngine:
                 else:
                     result = await self._dispatch_step(task, step)
                 
+                step.result = result
+                step.ended_at = time.time()
                 if result_is_success(result):
                     step.status = "SUCCESS"
                     step.result = result
                     step.ended_at = time.time()
                     return True
+                elif is_universal or execution_status(result) in {"BLOCKED", "UNAVAILABLE", "PENDING_CONFIRMATION", "CANCELLED", "TIMEOUT", "UNVERIFIED", "VERIFICATION_FAILED"}:
+                    step.status = execution_status(result)
+                    step.error = result.get("error") or result.get("detail") or step.status
+                    return False  # Worker owns bounded recovery; never replay a mission blindly.
                 else:
                     raise Exception(result.get("error", "Execution fail"))
                     
             except Exception as e:
+                if is_universal:
+                    step.status, step.error = "FAILED", str(e)
+                    return False
                 step.retry_count += 1
                 step.error = str(e)
                 if step.retry_count > step.max_retries:
@@ -131,12 +154,29 @@ class TaskEngine:
         migrate incrementally without making app-specific actions disappear.
         """
 
-        if step.action_type in UNIVERSAL_ACTION_TYPES and universal_mode(step.payload) != "legacy":
+        if step.action_type.upper() in UNIVERSAL_ACTION_TYPES and universal_mode(step.payload) != "legacy":
+            from core.orchestration.agent_contract import TaskContext
             surface = step.payload.get("surface") if isinstance(step.payload, dict) else None
             goal = goal_for_action(step.action_type, step.payload, step.description)
-            if task.original_intent and task.original_intent.strip() and task.original_intent.strip() != goal:
-                goal = f"{task.original_intent.strip()}\nCurrent step: {goal}"
-            return await execute_universal_goal(goal, surface=surface)
+            # Planner/model-authored node payloads cannot grant filesystem
+            # authority or define their own verification predicate. Only the
+            # host-owned task context supplies those. A node may narrow access.
+            parameters = {key: task.context[key] for key in
+                          ("allowed_roots", "evidence_dir", "verification", "desktop_allowed") if key in task.context}
+            if step.payload.get("desktop_allowed") is False:
+                parameters["desktop_allowed"] = False
+            parameters.update({"original_goal": task.original_intent, "current_step": {
+                "step_id": step.step_id, "description": step.description, "goal": goal, "action_type": step.action_type}})
+            deadlines = [float(value) for value in (task.context.get("deadline"), step.payload.get("deadline")) if value is not None]
+            context = TaskContext(task_id=step.step_id, goal=goal, parameters=parameters,
+                session_id=task.context.get("session_id"), correlation_id=task.task_id,
+                cancelled=task.status == "CANCELLED" or bool(task.context.get("cancelled")),
+                deadline=min(deadlines) if deadlines else None,
+                max_steps=max(1, min(40, int(task.context.get("max_steps", 20)), int(step.payload.get("max_steps", 40)))),
+                metadata={"parent_task_id": task.task_id})
+            context.cancel_check = lambda: task.status == "CANCELLED" or bool(task.context.get("cancelled"))
+            return await execute_universal_goal(goal, surface=surface, task_context=context,
+                runtime=getattr(self, "universal_runtime", None))
         return await self.controller(step.action_type, step.payload)
 
     async def _rollback_task(self, steps: List[TaskStep]):

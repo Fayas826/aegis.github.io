@@ -50,7 +50,7 @@ python -m uvicorn backend.api:app --host 127.0.0.1 --port 8000
 Run the HUD during development:
 
 ```bash
-npm --prefix frontend install
+npm --prefix frontend ci
 npm --prefix frontend run dev
 ```
 
@@ -108,3 +108,48 @@ must be reported separately from offline test results.
 The root Dockerfile currently builds the Node gateway only. The Python backend,
 GPU/audio drivers, browser binaries, Redis, and MongoDB are separate runtime
 dependencies and are not silently represented as fully containerized support.
+
+Build and deploy the gateway with the pinned Node image and committed lockfile:
+
+```bash
+docker build -t aegis-gateway .
+docker run --rm --env-file .env -p 4000:4000 aegis-gateway
+```
+
+Only the Node source and public assets enter this image; workspace memory,
+screenshots and local configuration are not copied. Browser downloads are
+disabled during this gateway build. Windows desktop input requires an
+interactive authorized Windows session and is not available in a Linux container.
+
+## Universal desktop runtime (Phase 4.5H work in progress)
+
+TaskEngine's universal steps now forward a structured `TaskContext` through the
+multimodal adapter to the existing GUI worker. Original intent and current step
+remain separate. A failed or unverified mission is not blindly replayed, and
+`CANCELLED`, `TIMEOUT`, `PENDING_CONFIRMATION` and nested failures stay negative.
+The registry entry is `desktop.universal_goal`; the explicit legacy escape hatch
+remains `payload.execution_mode = "legacy"`.
+
+Gemini and OpenAI share bounded action schemas and fresh-observation grounding.
+Configure `GEMINI_API_KEY` or `OPENAI_API_KEY` in the **process environment**;
+`AEGIS_GUI_PROVIDER=gemini` or `openai` selects one explicitly. The CLI does not
+automatically load `.env`. Never paste a key into a goal or commit it. A
+configured provider failure does not silently switch providers or to a script.
+
+```bash
+python run_aegis_universal.py "Open the editor and prepare a short draft"
+python -m pytest -q tests/test_universal_runtime_safety.py tests/test_universal_desktop_layer.py tests/test_universal_gui_worker.py tests/test_multimodal_runtime.py tests/test_verification_planner.py tests/test_shared_task_junction.py
+```
+
+Compound goals remain `UNVERIFIED` without independent caller-owned predicates
+in `TaskContext.parameters.verification`. File readback requires explicit
+`allowed_roots`, bounded UTF-8 content and a before-action identity baseline;
+an already-existing matching file does not prove a save. `require_reopen` also
+requires disappearance from the window inventory before reappearance, not just
+switching focus. This is native title/inventory evidence, not proof of a full
+canonical file path inside arbitrary applications.
+
+Offline mocks are not live acceptance. Three-category model-driven acceptance
+and a real multi-step save/close/reopen/readback are still pending. Some older
+chat/voice fast paths bypass TaskEngine and have not been migrated in this step.
+See `docs/phase-4.5h-validation.md` for actual checks and remaining blockers.

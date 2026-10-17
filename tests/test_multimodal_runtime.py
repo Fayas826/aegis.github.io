@@ -108,7 +108,7 @@ def test_barge_in_clears_audio_and_cancels_future_goals():
     assert result == {"status": "INTERRUPTED", "audio_cleared": True}
     assert list(adapter.audio_out) == []
     cancelled = run(adapter.execute_desktop_goal("Open the calculator"))
-    assert cancelled["status"] == "UNAVAILABLE"  # no worker remains the honest boundary
+    assert cancelled["status"] == "CANCELLED"
 
 
 def test_injected_live_session_supports_audio_and_screen_without_sdk():

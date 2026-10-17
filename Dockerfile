@@ -1,12 +1,15 @@
-FROM node:22-alpine
+FROM node:22.17.0-alpine
 
 WORKDIR /app
 
 COPY package*.json ./
 
-RUN npm install
+ENV PUPPETEER_SKIP_DOWNLOAD=true
+RUN npm ci
 
-COPY . .
+COPY tsconfig.json ./
+COPY src ./src
+COPY public ./public
 
 RUN npm run build
 

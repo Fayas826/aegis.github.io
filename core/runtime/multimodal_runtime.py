@@ -43,7 +43,7 @@ def _import_available(module_name: str) -> bool:
 
 
 def _clean_goal(goal: Any) -> str:
-    return " ".join(str(goal or "").split())
+    return goal.strip() if isinstance(goal, str) else ""
 
 
 @dataclass(frozen=True)
@@ -175,7 +175,8 @@ def _status_from_worker(value: Any) -> Optional[str]:
     """Extract a truthful public status from a worker result."""
 
     if isinstance(value, Mapping):
-        status = str(value.get("verification_status") or value.get("status") or "").upper()
+        from core.execution.universal_dispatch import execution_status
+        status = execution_status(value)
     else:
         status = str(value or "").upper()
     if status in {"BLOCKED", "SAFETY_BLOCK", "SAFETY_BLOCKED", "BLOCKED_BY_CONSENT"}:
@@ -186,7 +187,9 @@ def _status_from_worker(value: Any) -> Optional[str]:
         return OutcomeStatus.CLARIFICATION_REQUIRED.value
     if status in {"VERIFIED", "VERIFIED_SUCCESS"}:
         return OutcomeStatus.VERIFIED.value
-    if status in {"UNVERIFIED", "FAILED", "ERROR", "CANCELLED", "TIMEOUT", "SUCCESS", "COMPLETED"}:
+    if status in {"FAILED", "ERROR", "CANCELLED", "TIMEOUT", "VERIFICATION_FAILED", "PENDING_CONFIRMATION", "PERMISSION_REQUIRED"}:
+        return status
+    if status in {"UNVERIFIED", "SUCCESS", "COMPLETED"}:
         return OutcomeStatus.UNVERIFIED.value
     return None
 
@@ -220,6 +223,7 @@ class MultimodalRuntimeAdapter:
         self.max_evidence_age_s = max(0.0, float(max_evidence_age_s))
         self.audio_out: Deque[bytes] = deque(maxlen=128)
         self._cancel_event = asyncio.Event()
+        self._desktop_contexts: Dict[str, Any] = {}
         self._live_context: Any = None
         self._live_session: Any = None
         self._live_model: str = self.configuration.live_model
@@ -231,6 +235,8 @@ class MultimodalRuntimeAdapter:
 
         del reason  # the result includes a stable status; callers can log detail
         self._cancel_event.set()
+        for context in list(self._desktop_contexts.values()):
+            context.cancelled = True
         self.audio_out.clear()
 
     def barge_in(self) -> Dict[str, Any]:
@@ -276,18 +282,16 @@ class MultimodalRuntimeAdapter:
         surface: Optional[str] = None,
         headless: bool = False,
         max_steps: int = 8,
+        task_context: Any = None,
     ) -> Dict[str, Any]:
         normalized, error = validate_gui_goal(goal)
         if error:
             return RuntimeResult(OutcomeStatus.CLARIFICATION_REQUIRED.value, "goal", error).to_dict()
-        clarification = self._planner_clarification(normalized)
-        if clarification is not None:
-            return clarification.to_dict()
         chosen = (surface or ("browser" if self._is_browser_goal(normalized) else "desktop")).casefold()
         if chosen in {"browser", "web"}:
             return await self.execute_browser_goal(normalized, headless=headless, max_steps=max_steps)
         if chosen in {"desktop", "gui", "voice"}:
-            return await self.execute_desktop_goal(normalized)
+            return await self.execute_desktop_goal(normalized, task_context=task_context, max_steps=max_steps)
         return RuntimeResult(OutcomeStatus.CLARIFICATION_REQUIRED.value, "goal", "Unknown execution surface.").to_dict()
 
     async def execute_browser_goal(
@@ -351,16 +355,21 @@ class MultimodalRuntimeAdapter:
         data["adapter_status"] = status
         return RuntimeResult(status, "browser", data.get("error", "Browser mission evaluated."), data).to_dict()
 
-    async def execute_desktop_goal(self, goal: str) -> Dict[str, Any]:
+    async def execute_desktop_goal(self, goal: str, *, task_context: Any = None, max_steps: int = 20) -> Dict[str, Any]:
         """Dispatch a universal GUI goal through the injected authorized worker."""
 
         if self._cancel_event.is_set():
-            return RuntimeResult(OutcomeStatus.UNAVAILABLE.value, "desktop", "Desktop goal was cancelled before dispatch.").to_dict()
+            return RuntimeResult("CANCELLED", "desktop", "Desktop goal was cancelled before dispatch.").to_dict()
+        normalized, error = validate_gui_goal(goal)
+        if error:
+            return RuntimeResult("CLARIFICATION_REQUIRED", "desktop", error).to_dict()
+        from core.orchestration.agent_contract import TaskContext
+        context = task_context or TaskContext(goal=normalized, max_steps=max_steps)
         if self.desktop_worker is None:
             try:
                 from core.runtime.universal_gui_worker import UniversalGUIWorker
 
-                self.desktop_worker = UniversalGUIWorker()
+                self.desktop_worker = UniversalGUIWorker(max_steps=40, cancel_check=lambda: self._cancel_event.is_set())
             except Exception as exc:
                 return RuntimeResult(OutcomeStatus.UNAVAILABLE.value, "desktop", f"Universal desktop worker unavailable: {exc}").to_dict()
         worker = self.desktop_worker
@@ -368,15 +377,29 @@ class MultimodalRuntimeAdapter:
         def invoke() -> Any:
             callback = lambda message: None
             method = getattr(worker, "run_task", worker)
-            try:
-                return method(goal, status_callback=callback)
-            except TypeError:
-                return method(goal)
+            # Inspect before dispatch. A TypeError from *inside* a worker must
+            # never trigger a second run and duplicate real desktop input.
+            signature = inspect.signature(method)
+            kwargs = {}
+            if "status_callback" in signature.parameters:
+                kwargs["status_callback"] = callback
+            if "task_context" in signature.parameters:
+                kwargs["task_context"] = context
+            return method(normalized, **kwargs)
 
+        self._desktop_contexts[context.task_id] = context
         try:
             outcome = await asyncio.to_thread(invoke)
+        except asyncio.CancelledError:
+            context.cancelled = True
+            self.cancel()
+            # to_thread cannot kill an input backend; worker cooperatively
+            # stops before the next action and retains its desktop lease.
+            raise
         except Exception as exc:
-            return RuntimeResult(OutcomeStatus.UNVERIFIED.value, "desktop", f"Desktop worker failed: {exc}").to_dict()
+            return RuntimeResult("FAILED", "desktop", f"Desktop worker failed: {type(exc).__name__}").to_dict()
+        finally:
+            self._desktop_contexts.pop(context.task_id, None)
 
         data = _result_data(outcome)
         status = _status_from_worker(outcome)

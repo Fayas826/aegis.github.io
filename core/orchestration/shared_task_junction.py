@@ -25,6 +25,7 @@ class SharedTaskJunction:
     TERMINAL_STATUSES = {
         "SUCCESS", "VERIFIED", "UNVERIFIED", "FAILED", "BLOCKED", "UNAVAILABLE",
         "TIMEOUT", "CANCELLED", "CONFIRMED", "VERIFICATION_FAILED", "SAFETY_BLOCK",
+        "PENDING_CONFIRMATION", "PERMISSION_REQUIRED", "CLARIFICATION_REQUIRED",
     }
 
     def __init__(self, store: Optional[AegisSQLiteStore] = None):

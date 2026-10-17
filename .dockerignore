@@ -33,4 +33,3 @@ sentinel.lock
 temp_voice.wav
 temp_wake.wav
 vision_temp.png
-package-lock.json
