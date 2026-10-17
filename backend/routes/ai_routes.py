@@ -75,6 +75,12 @@ async def jarvis_endpoint(query: Query, token: dict = Depends(_verify_api_key)):
     query.metadata["is_correction"] = intent.is_correction
     query.metadata["intent_confidence"] = intent.confidence
 
+    # Canonical Windows desktop seam: specialized browser/filesystem/chat routes
+    # remain below, but actionable GUI goals use the universal worker.
+    from backend.routes.universal_desktop_route import execute_if_canonical_desktop_goal
+    canonical_desktop = await execute_if_canonical_desktop_goal(effective_message, query.metadata)
+    if canonical_desktop is not None:
+        return canonical_desktop
     task = await planner.create_plan(effective_message, context=query.metadata)
     task_engine = get_task_engine()
 
