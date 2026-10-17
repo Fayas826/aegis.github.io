@@ -74,7 +74,7 @@ Focused offline command:
 python -m pytest -q tests/test_circuit_breaker.py tests/test_local_desktop_provider.py tests/test_local_desktop_worker.py tests/test_storage_task_lookup.py tests/test_universal_gui_worker.py tests/test_universal_runtime_safety.py tests/test_universal_desktop_layer.py tests/test_multimodal_runtime.py tests/test_verification_planner.py tests/test_shared_task_junction.py
 ```
 
-- **183 tests passed in 26.14 seconds.** HTTP/provider/input tests use mocks; GUI
+- **190 tests passed in 44.11 seconds.** HTTP/provider/input tests use mocks; GUI
   tests are not claimed as live multi-application acceptance.
 - Live `aegis-sovereign:latest` inference returned the requested valid action
   JSON from a synthetic native-control prompt. No desktop action was sent by

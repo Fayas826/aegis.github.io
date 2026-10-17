@@ -95,6 +95,13 @@ Notepad, Calculator, Paint and File Explorer through the canonical TaskEngine
 path. The compound document save/close/reopen/readback portion remains pending;
 it is not inferred from these launch/window results.
 
+The live `backend/routes/ai_routes.py` entry-route change is intentionally still
+unstaged because that file contains a large unrelated pre-existing working-tree
+rewrite. The current workspace route does use `_execute_canonical_desktop_goal`
+for actionable Windows desktop categories; it must be staged separately after
+the owner reviews that larger file. The committed canonical worker/action/test
+changes remain independent of that route-file staging decision.
+
 ## Remaining work before claiming Phase 4.5H complete
 
 1. Select a working installed local provider/model in the runner's environment,
