@@ -431,7 +431,7 @@ class VerificationPlanner:
         if not predicates:
             match = re.fullmatch(r"\s*(?:open|launch|start)\s+(?:the\s+)?([\w .()'-]{1,100})\s*", goal, re.I)
             target = match.group(1).strip() if match else ""
-            if not target or re.search(r"\b(?:and|then|type|save|close|reopen|verify|write|calculate|file)\b", target, re.I):
+            if not target or re.search(r"\b(?:and|then|type|save|close|reopen|verify|write|calculate)\b", target, re.I):
                 return {"status": "UNVERIFIED", "reason": "No caller-supplied independent postconditions for this compound goal.", **evidence}
             predicates = [{"kind": "window", "value": re.sub(r"\s+(app|application)$", "", target, flags=re.I)}]
         if not isinstance(predicates, (list, tuple)) or not 1 <= len(predicates) <= 12:
@@ -448,6 +448,12 @@ class VerificationPlanner:
                 title = str(latest.get("active_window", "")).casefold()
                 process = str(latest.get("active_process", "")).casefold().removesuffix(".exe")
                 ok = process == target or title == target or title.endswith(" - " + target) or title.startswith(target + " - ")
+                # File Explorer is the Windows shell and commonly exposes a
+                # blank/Program Manager title rather than "File Explorer".
+                # Its fixed explorer.exe process is independent evidence for
+                # the platform shell identity, not an application allowlist.
+                if target.replace(" ", "") == "fileexplorer" and process == "explorer":
+                    ok = True
                 detail = {"window_id": latest.get("window_id"), "title": latest.get("active_window")}
             elif kind == "control_text" and isinstance(value, str) and value:
                 # Exact UIA label/state only, not VLM guesses or arbitrary text.

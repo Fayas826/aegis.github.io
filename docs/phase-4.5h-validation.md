@@ -90,7 +90,10 @@ were submitted at the real TaskEngine step-dispatch seam; each returned
 
 These local junction IDs are diagnostic pointers, not portable evidence files.
 No document was created manually to manufacture GUI acceptance evidence.
-Three-category model-driven acceptance is **NOT RUN / BLOCKED**, not passed.
+The local-model window portion of multi-category acceptance is now verified for
+Notepad, Calculator, Paint and File Explorer through the canonical TaskEngine
+path. The compound document save/close/reopen/readback portion remains pending;
+it is not inferred from these launch/window results.
 
 ## Remaining work before claiming Phase 4.5H complete
 

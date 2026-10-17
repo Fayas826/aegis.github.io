@@ -94,6 +94,15 @@ python -m pytest -q tests/test_circuit_breaker.py tests/test_local_desktop_provi
   Calculator with **zero inputs**, proving the fresh independent state check.
   It does not pretend a new model invocation or application launch happened in
   that read-only run.
+- Subsequent bounded local-model window acceptance through the canonical
+  TaskEngine path verified four application categories: Notepad (text editor,
+  task `69751a65-dee8-48e4-98b7-d2e16bddabc3`), Calculator (calculator,
+  task `b454dc36-83c0-4364-995a-3dfd2ebfc432`), Paint (graphics editor,
+  task `c170d695-eebb-497c-94f2-e36819aca742`), and File Explorer (Windows
+  shell/file manager, task `98e60e9b-4297-457f-85c8-2afc320cda13`). Each used
+  `aegis-sovereign:latest`; all final results were `VERIFIED`. Some receipts
+  include an intermediate blocked focus proposal followed by a safe replan and
+  successful launch; the worker did not replay an uncertain input.
 
 Private junction pointers for diagnosis: timed-out attempt
 `c854b61c-32d6-466f-83c4-00879ea97492` (CANCELLED, effect unverified), guarded launch

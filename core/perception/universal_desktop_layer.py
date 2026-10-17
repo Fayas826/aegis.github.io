@@ -551,7 +551,7 @@ def _default_capture() -> Mapping[str, Any]:
             "image_b64": base64.b64encode(image).decode("ascii"), "image_mime": "image/png"}
 
 
-def _default_uia() -> tuple[Sequence[Any], Optional[str]]:
+def _default_uia(window_id: int = 0) -> tuple[Sequence[Any], Optional[str]]:
     if sys.platform != "win32":
         return (), "Windows UI Automation is unavailable on this platform"
     try:
@@ -560,8 +560,19 @@ def _default_uia() -> tuple[Sequence[Any], Optional[str]]:
         if initializer is None:
             return (), "UI Automation per-thread COM initializer is unavailable"
         with initializer():
-            foreground = auto.GetForegroundWindow()
-            root = auto.ControlFromHandle(foreground) if isinstance(foreground, int) else foreground
+            foreground = window_id or (auto.GetForegroundWindow() if hasattr(auto, "GetForegroundWindow") else 0)
+            if not foreground and sys.platform == "win32":
+                try:
+                    import ctypes
+                    foreground = int(ctypes.windll.user32.GetForegroundWindow() or 0)
+                except Exception:
+                    foreground = 0
+            root = auto.ControlFromHandle(foreground) if isinstance(foreground, int) and foreground else foreground
+            if not root and window_id:
+                try:
+                    root = auto.ControlFromHandle(window_id)
+                except Exception:
+                    root = None
             if not root:
                 return (), "UI Automation foreground window unavailable"
             return _traverse_uia(root)
@@ -575,7 +586,7 @@ _UIA_SCAN_LOCK = threading.Lock()
 _UIA_SCAN_PENDING = None
 
 
-def _bounded_default_uia(window_id: int = 0, timeout: float = 1.0) -> tuple[Sequence[Any], Optional[str]]:
+def _bounded_default_uia(window_id: int = 0, timeout: float = 5.0) -> tuple[Sequence[Any], Optional[str]]:
     """A hung read-only COM call must not trap the desktop action thread.
 
     At most one native scan can be outstanding. Timed-out results are discarded,
@@ -585,14 +596,14 @@ def _bounded_default_uia(window_id: int = 0, timeout: float = 1.0) -> tuple[Sequ
     global _UIA_SCAN_PENDING
     request = {"done": threading.Event(), "result": ((), "UIA read unavailable")}
     with _UIA_SCAN_LOCK:
-        if _UIA_SCAN_PENDING is not None:
+        if _UIA_SCAN_PENDING is not None and not _UIA_SCAN_PENDING.get("done", threading.Event()).is_set():
             return (), "Previous UIA read is still pending; no stale controls reused"
         _UIA_SCAN_PENDING = request
 
     def scan():
         global _UIA_SCAN_PENDING
         try:
-            request["result"] = _default_uia()
+            request["result"] = _default_uia(window_id)
         except Exception:
             request["result"] = ((), "Native UIA read failed")
         finally:
@@ -604,8 +615,10 @@ def _bounded_default_uia(window_id: int = 0, timeout: float = 1.0) -> tuple[Sequ
     threading.Thread(target=scan, name="aegis-uia-reader", daemon=True).start()
     if not request["done"].wait(timeout):
         return (), "UIA read exceeded its time budget; controls unavailable"
-    if window_id and sys.platform == "win32" and _windows_snapshot().get("window_id") != window_id:
-        return (), "Foreground changed during UIA read; controls discarded"
+    if window_id and sys.platform == "win32":
+        current_id = _windows_snapshot().get("window_id")
+        if current_id and current_id != window_id:
+            return (), "Foreground changed during UIA read; controls discarded"
     return request["result"]
 
 

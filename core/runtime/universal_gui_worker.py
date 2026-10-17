@@ -468,6 +468,7 @@ class UniversalGUIWorker:
         if verification["status"] == "VERIFIED":
             self._event("verification_result", verification=verification, phase="before_planning")
             return self._outcome("VERIFIED", "Goal already established by fresh independent evidence; no input needed.")
+        self._preflight_application_inventory(goal)
         self._neural_event(goal, provider, "started", "RUNNING")
         repeated = {}
         failure_count = 0
@@ -532,6 +533,32 @@ class UniversalGUIWorker:
                 return self._outcome("VERIFIED", result.get("reason", "Independent verification passed."), step)
         verification = self._verify(goal)
         return self._outcome(verification["status"], "Step budget exhausted. " + verification["reason"], len(self._history))
+
+    @staticmethod
+    def _goal_application_query(goal):
+        match = re.match(r"\s*(?:open|launch|start|run)\s+(?:the\s+)?(.+?)\s*$", goal, re.I)
+        if not match:
+            return ""
+        target = re.split(r"\s+(?:and then|then|and)\s+|[,;]", match.group(1), maxsplit=1, flags=re.I)[0]
+        return target.strip(" .!?\"")[:256]
+
+    def _preflight_application_inventory(self, goal):
+        """Seed the local planner with real discovery without executing input."""
+        query = self._goal_application_query(goal)
+        discover = getattr(self.actions, "discover_applications", None)
+        if not query or not callable(discover):
+            return
+        try:
+            inventory = discover(query)
+            self._history.append({"action": "discover_applications", "arguments": {"query": query},
+                                  "result": inventory, "state_changed": False,
+                                  "recovery": "Read-only application inventory preflight."})
+            self._event("application_inventory", query=query,
+                        item_count=len(inventory.get("items", [])) if isinstance(inventory, Mapping) else 0)
+        except Exception:
+            # Discovery is advisory; the model can still use list_windows or
+            # discover_applications itself. Never fail a task on inventory IO.
+            return
 
     @staticmethod
     def _openai_tools():

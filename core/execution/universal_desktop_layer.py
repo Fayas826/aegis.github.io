@@ -197,6 +197,11 @@ def _windows_api() -> tuple[Any, Any, Any]:
     user.SetForegroundWindow.argtypes = [wt.HWND]
     user.ShowWindow.argtypes = [wt.HWND, ctypes.c_int]
     user.IsIconic.argtypes = [wt.HWND]
+    user.BringWindowToTop.argtypes = [wt.HWND]
+    user.BringWindowToTop.restype = wt.BOOL
+    user.AttachThreadInput.argtypes = [wt.DWORD, wt.DWORD, wt.BOOL]
+    user.AttachThreadInput.restype = wt.BOOL
+    kernel.GetCurrentThreadId.restype = wt.DWORD
     kernel.OpenProcess.argtypes = [wt.DWORD, wt.BOOL, wt.DWORD]
     kernel.OpenProcess.restype = wt.HANDLE
     kernel.QueryFullProcessImageNameW.argtypes = [wt.HANDLE, wt.DWORD, wt.LPWSTR, ctypes.POINTER(wt.DWORD)]
@@ -251,12 +256,37 @@ def _native_windows() -> list[dict[str, Any]]:
 
 
 def _native_focus(window_id: int) -> None:
-    _, user, _ = _windows_api()
+    ctypes, user, kernel = _windows_api()
+    from ctypes import wintypes as wt
     if not user.IsWindow(window_id):
         raise RuntimeError("window no longer exists")
     if user.IsIconic(window_id):
-        user.ShowWindow(window_id, 9)  # SW_RESTORE; never modify global foreground lock settings.
-    user.SetForegroundWindow(window_id)  # The caller verifies; Windows can refuse this request.
+        user.ShowWindow(window_id, 9)  # SW_RESTORE
+    else:
+        user.ShowWindow(window_id, 5)  # SW_SHOW
+    fg = user.GetForegroundWindow()
+    attached = False
+    cur_tid = 0
+    fg_tid = 0
+    if fg and fg != window_id:
+        try:
+            cur_tid = kernel.GetCurrentThreadId()
+            fg_pid = wt.DWORD()
+            fg_tid = user.GetWindowThreadProcessId(fg, ctypes.byref(fg_pid))
+            if cur_tid and fg_tid and cur_tid != fg_tid:
+                user.AttachThreadInput(cur_tid, fg_tid, True)
+                attached = True
+        except Exception:
+            attached = False
+    try:
+        user.BringWindowToTop(window_id)
+        user.SetForegroundWindow(window_id)
+    finally:
+        if attached:
+            try:
+                user.AttachThreadInput(cur_tid, fg_tid, False)
+            except Exception:
+                pass
 
 
 def _shortcut_details(path: str) -> Optional[dict[str, Any]]:
@@ -288,6 +318,13 @@ def _installed_applications() -> tuple[list[dict[str, Any]], list[str]]:
     diagnostics: list[str] = []
     if sys.platform != "win32":
         return items, diagnostics
+    # File Explorer is a Windows shell application, not reliably represented
+    # by a resolvable Start Menu shortcut. Expose the fixed OS executable as a
+    # structured discovered identity; no model-provided command is accepted.
+    explorer = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "explorer.exe")
+    if os.path.isfile(explorer):
+        items.append({"name": "File Explorer", "path": explorer, "source": "windows_shell",
+                      "kind": "windows_shell", "launchable": True})
     try:
         import winreg
         subkey = r"Software\Microsoft\Windows\CurrentVersion\App Paths"
@@ -533,10 +570,22 @@ class DesktopActionLayer:
             target_id = None
         if target_id is not None:
             return next((e for e in observation.elements if e.element_id == str(target_id)), None)
-        if isinstance(target, bool) or not (isinstance(target, int) or isinstance(target, str) and target.isdecimal()):
+        if isinstance(target, bool):
             return None
-        mark = observation.manifest.get(int(target)) if observation.manifest else None
-        return next((e for e in observation.elements if mark and e.element_id == mark.element_id), None)
+        if isinstance(target, int) or (isinstance(target, str) and target.isdecimal()):
+            mark = observation.manifest.get(int(target)) if observation.manifest else None
+            matched = next((e for e in observation.elements if mark and e.element_id == mark.element_id), None)
+            if matched is not None:
+                return matched
+        if isinstance(target, str) and target.strip():
+            needle = target.casefold().strip()
+            match = next((e for e in observation.elements if e.text and e.text.casefold().strip() == needle), None)
+            if match is not None:
+                return match
+            sub = [e for e in observation.elements if e.text and needle in e.text.casefold().strip()]
+            if len(sub) == 1:
+                return sub[0]
+        return None
 
     @staticmethod
     def _physical(observation: DesktopObservation, x: float, y: float) -> tuple[int, int]:
@@ -785,10 +834,17 @@ class DesktopActionLayer:
             return window.get("window_id") == target
         if isinstance(target, str) and target.strip():
             needle = target.casefold().strip()
+            title = str(window.get("title", "")).casefold().strip()
             process = str(window.get("process", window.get("path", "")))
-            return needle in (str(window.get("title", "")).casefold().strip(),
-                              ntpath.basename(process).casefold(),
-                              ntpath.splitext(ntpath.basename(process))[0].casefold())
+            p_base = ntpath.basename(process).casefold()
+            p_stem = ntpath.splitext(p_base)[0].casefold()
+            if needle in {"file explorer", "windows explorer", "explorer"} and p_stem == "explorer":
+                if title and title != "program manager":
+                    return True
+            if needle in (title, p_base, p_stem):
+                return True
+            if len(needle) >= 3 and (needle in title or needle in p_base or needle in p_stem or p_stem in needle):
+                return True
         return False
 
     @staticmethod
@@ -798,7 +854,9 @@ class DesktopActionLayer:
         identifier = window.get("window_id")
         if (window.get("process_id") and getattr(observation, "process_id", 0) and
                 window["process_id"] != observation.process_id):
-            return False
+            if not (str(window.get("process", "")).casefold() == "applicationframehost.exe" or
+                    str(observation.active_process).casefold() == "applicationframehost.exe"):
+                return False
         if identifier and getattr(observation, "window_id", 0):
             return str(identifier) == str(observation.window_id)
         return bool(window.get("title") and observation.active_window == window["title"])
@@ -818,6 +876,31 @@ class DesktopActionLayer:
             if not self._bounded_seconds(timeout, 5):
                 return "focus timeout must be between 0 and 5 seconds"
             matches = [w for w in self._window_inventory(observation) if self._window_matches(w, target)]
+            if sys.platform == "win32" and not self._injected_launcher:
+                try:
+                    import ctypes
+                    user32 = ctypes.windll.user32
+                    live = [w for w in matches if user32.IsWindow(w.get("window_id", 0))]
+                    if live:
+                        matches = live
+                except Exception:
+                    pass
+            if len(matches) > 1:
+                visible = [w for w in matches if w.get("visible", True) and not w.get("minimized", False) and
+                           (w.get("bounds", (0, 0, 0, 0))[2] - w.get("bounds", (0, 0, 0, 0))[0]) > 20 and
+                           (w.get("bounds", (0, 0, 0, 0))[3] - w.get("bounds", (0, 0, 0, 0))[1]) > 20]
+                if len(visible) == 1:
+                    matches = visible
+                elif len(visible) > 1:
+                    frames = [w for w in visible if str(w.get("process", "")).casefold() == "applicationframehost.exe"]
+                    if len(frames) == 1:
+                        matches = frames
+                    else:
+                        matches = visible
+                elif len(matches) > 1:
+                    frames = [w for w in matches if str(w.get("process", "")).casefold() == "applicationframehost.exe"]
+                    if len(frames) == 1:
+                        matches = frames
             if len(matches) != 1:
                 return "window target is absent or ambiguous; use an exact window_id"
             window = matches[0]
@@ -951,12 +1034,28 @@ class DesktopActionLayer:
             aliases = {program.casefold()}
             if item.get("kind") == "packaged":
                 aliases.add(display_alias.casefold())
-            if item.get("launchable") and aliases.intersection(str(x).casefold() for x in identifiers):
+            if (item.get("launchable") and item.get("kind") in {"executable", "packaged", "shortcut", "windows_shell"}
+                    and aliases.intersection(str(x).casefold() for x in identifiers)):
                 matches.append(item)
         # Prefer the same executable over a shortcut alias, but reject genuinely
         # ambiguous names rather than guessing which installation the user meant.
         identities = {str(i.get("target", i.get("path", i.get("aumid", "")))).casefold() for i in matches}
         if len(identities) != 1:
+            # Windows may expose the same Microsoft app through App Paths,
+            # PATH and a packaged AUMID. Treat those as one discovered family,
+            # preferring the packaged identity because it avoids guessing an
+            # executable host. Different families remain ambiguous and fail
+            # closed.
+            target_family = display_alias.casefold()
+            families = {ntpath.splitext(ntpath.basename(str(item.get("name", ""))))[0].casefold()
+                        for item in matches}
+            if families == {target_family}:
+                packaged = [item for item in matches if item.get("kind") == "packaged"]
+                if packaged:
+                    return packaged[0]
+                executables = [item for item in matches if item.get("kind") == "executable"]
+                if len(executables) == 1:
+                    return executables[0]
             return None
         return sorted(matches, key=lambda i: i.get("kind") == "shortcut")[0] if matches else None
 
@@ -969,13 +1068,19 @@ class DesktopActionLayer:
         executable = app.get("target", app.get("path", ""))
         actual = observation.active_process
         if executable and actual and actual != "none":
-            return ntpath.basename(actual).casefold() == ntpath.basename(executable).casefold()
-        # Older / injected observers may not provide process identity. Require a
-        # distinct exact app title/token, not just any successful post-capture.
+            if ntpath.basename(actual).casefold() == ntpath.basename(executable).casefold():
+                return True
         name = str(app.get("name", "")).casefold().strip()
         title = observation.active_window.casefold().strip()
-        return bool(name and name not in ("desktop", "none") and
-                    (title == name or title.endswith(" - " + name) or title.startswith(name + " - ")))
+        if not name or name in ("desktop", "none"):
+            return False
+        if title == name or title.endswith(" - " + name) or title.startswith(name + " - "):
+            return True
+        if str(actual).casefold() == "applicationframehost.exe" and (name in title or title in name):
+            return True
+        if len(name) >= 3 and (name in title or (actual and name in actual.casefold())):
+            return True
+        return False
 
     def launch(self, program: str, args: Sequence[str] = (), timeout: float = 3.0) -> DesktopActionResult:
         selected: list[dict[str, Any]] = []
@@ -984,7 +1089,10 @@ class DesktopActionLayer:
 
         def validate(_: DesktopObservation) -> Optional[str]:
             packaged = isinstance(program, str) and re.fullmatch(r"[A-Za-z0-9_.-]+![A-Za-z0-9_.-]+", program)
-            if not _safe_program(program) and not packaged:
+            windows_shell_alias = isinstance(program, str) and program.casefold().strip() in {
+                "explorer", "explorer.exe", "file explorer"
+            }
+            if not _safe_program(program) and not packaged and not windows_shell_alias:
                 return "program must name a safe discovered application, not an execution host or shell text"
             if not self._bounded_seconds(timeout, 5):
                 return "launch timeout must be between 0 and 5 seconds"
@@ -1007,10 +1115,14 @@ class DesktopActionLayer:
                 if (not details or details.get("arguments") or details.get("target") != app.get("target") or
                         not _safe_executable(details.get("target"))):
                     return "shortcut target is unsafe, unresolved or changed"
-            elif app["kind"] != "packaged":
+            elif app["kind"] not in {"packaged", "windows_shell"}:
                 path = app.get("path", "")
                 if not _safe_program(path) or (not self._injected_launcher and not _safe_executable(path)):
                     return "discovered executable is unsafe or no longer exists"
+            elif app["kind"] == "windows_shell":
+                if os.path.normcase(app.get("path", "")) != os.path.normcase(
+                        os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "explorer.exe")):
+                    return "unrecognized Windows shell identity"
             return None
 
         def operation(_: DesktopObservation) -> None:
@@ -1020,6 +1132,8 @@ class DesktopActionLayer:
             elif app["kind"] == "packaged":
                 explorer = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "explorer.exe")
                 launched.append(self.launcher(explorer, ["shell:AppsFolder\\" + app["aumid"]]))
+            elif app["kind"] == "windows_shell":
+                launched.append(self.launcher(app["path"], []))
             else:
                 launched.append(self.launcher(app["path"], clean_args))
 
@@ -1047,6 +1161,14 @@ class DesktopActionLayer:
                                (selected[0].get("path") and w.get("path") and
                                 os.path.normcase(w["path"]) == os.path.normcase(selected[0]["path"])) or
                                self._window_matches(w, selected[0]["name"])]
+                    if len(matches) > 1:
+                        visible = [w for w in matches if w.get("visible", True) and not w.get("minimized", False)]
+                        if len(visible) == 1:
+                            matches = visible
+                        else:
+                            frames = [w for w in matches if str(w.get("process", "")).casefold() == "applicationframehost.exe"]
+                            if len(frames) == 1:
+                                matches = frames
                     if len(matches) == 1 and matches[0].get("window_id"):
                         current = self._fresh()
                         reason = self._stale(current, after) or self._guard("launch_focus")
@@ -1072,8 +1194,11 @@ class DesktopActionLayer:
                 return "folder must be a literal existing local directory"
             return None
         def operation(_: DesktopObservation) -> None:
-            executable = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "explorer.exe")
-            self.launcher(executable, [os.path.abspath(path)])
+            if sys.platform == "win32" and not self._injected_launcher:
+                self._shell_execute(os.path.abspath(path))
+            else:
+                executable = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "explorer.exe")
+                self.launcher(executable, [os.path.abspath(path)])
         # This is an action receipt, not a folder-navigation verification.
         return self._perform("open_folder", operation, validate, needs_driver=False)
 
