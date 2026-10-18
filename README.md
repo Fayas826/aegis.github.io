@@ -24,12 +24,13 @@ explicit prerequisites.
    npm ci
    ```
 
-3. Install Python dependencies in a project-local virtual environment:
+3. Install Python backend dependencies in a project-local virtual environment.
+   The exact direct runtime versions are kept in `backend/requirements.lock`:
 
    ```bash
    python3 -m venv .venv
    . .venv/bin/activate
-   python -m pip install -r backend/requirements.txt
+   python -m pip install -r backend/requirements.lock
    ```
 
 ## Run
@@ -46,6 +47,17 @@ Run the Python backend in another terminal:
 ```bash
 python -m uvicorn backend.api:app --host 127.0.0.1 --port 8000
 ```
+
+The Windows desktop/voice runtime is a separate environment because it needs an
+interactive Windows session, native input drivers, and optional audio/UI
+automation packages:
+
+```powershell
+py -3.11 -m venv .venv-aegis
+.\.venv-aegis\Scripts\python -m pip install -r aegis\requirements.lock
+```
+
+Do not install the AEGIS desktop lock into the Linux backend container.
 
 Run the HUD during development:
 
@@ -120,6 +132,25 @@ Only the Node source and public assets enter this image; workspace memory,
 screenshots and local configuration are not copied. Browser downloads are
 disabled during this gateway build. Windows desktop input requires an
 interactive authorized Windows session and is not available in a Linux container.
+
+Build the Python API image separately from the repository root:
+
+```bash
+docker build -f backend/Dockerfile -t aegis-api .
+docker run --rm --env-file .env -p 8000:8000 aegis-api
+```
+
+Or start the API service through Compose:
+
+```bash
+docker compose up --build api
+```
+
+The root `Dockerfile` remains the Node gateway image. `package-lock.json`,
+`backend/requirements.lock`, and `aegis/requirements.lock` are the committed
+dependency lockfiles for the three supported runtime surfaces. A Linux
+container cannot control the host Windows desktop, capture its microphone, or
+use Windows UI Automation.
 
 ## Universal desktop runtime (Phase 4.5H work in progress)
 

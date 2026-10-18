@@ -1,0 +1,9 @@
+google-genai==1.65.0
+mss==10.2.0
+pillow==12.3.0
+pyautogui==0.9.54
+pyperclip==1.11.0
+pyaudio==0.2.14
+psutil==7.2.2
+# Optional Windows UIAutomation for native Accessibility Tree extraction:
+uiautomation==2.0.29; sys_platform == 'win32'

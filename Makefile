@@ -25,7 +25,8 @@ PYTHON_OFFLINE_TESTS := \
 	tests/test_storage_task_lookup.py \
 	tests/test_verification_planner.py \
 	tests/test_multimodal_runtime.py \
-	tests/test_gemini_computer_use_agent.py
+	tests/test_gemini_computer_use_agent.py \
+	tests/test_task_engine_isolation.py
 
 .PHONY: test test-python test-node build
 

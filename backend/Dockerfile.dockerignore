@@ -1,0 +1,11 @@
+*
+!backend/
+!backend/**
+!core/
+!core/**
+!frontend/
+!frontend/**
+!infrastructure/
+!infrastructure/**
+!project_memory/
+!project_memory/**

@@ -1,0 +1,11 @@
+# Windows desktop/voice runtime lock. This environment is separate from the
+# Linux backend image because pyautogui, PyAudio, and UI Automation are host
+# session integrations.
+google-genai==1.65.0
+mss==10.2.0
+pillow==12.3.0
+pyautogui==0.9.54
+pyperclip==1.11.0
+pyaudio==0.2.14
+psutil==7.2.2
+uiautomation==2.0.29; sys_platform == 'win32'
