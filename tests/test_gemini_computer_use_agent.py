@@ -30,7 +30,8 @@ def test_coordinate_out_of_range_is_rejected():
         raise AssertionError("out-of-range computer-use coordinate was accepted")
 
 
-def test_missing_gemini_configuration_is_unavailable():
+def test_missing_gemini_configuration_is_unavailable(monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     agent = GeminiComputerUseBrowserAgent(browser_runtime=Runtime(), client=None)
     result = asyncio.run(agent.execute_task("search the web"))
     assert result["status"] == "UNAVAILABLE"
