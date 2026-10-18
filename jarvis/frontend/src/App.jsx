@@ -148,7 +148,7 @@ export default function App() {
 
       {/* Sidebar */}
       <div className="w-64 bg-black/40 backdrop-blur-md border-r border-blue-500/20 p-6 flex flex-col z-10 pointer-events-auto">
-        <h1 className="text-3xl font-bold mb-8 tracking-widest text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-purple-500 drop-shadow-[0_0_10px_rgba(0,191,255,0.8)]">JARVIS ⚡</h1>
+        <h1 className="text-3xl font-bold mb-8 tracking-widest text-transparent bg-clip-text bg-linear-to-r from-blue-400 to-purple-500 drop-shadow-[0_0_10px_rgba(0,191,255,0.8)]">JARVIS ⚡</h1>
 
         <div className="space-y-4 flex-1">
           <button onClick={() => alert("Dashboard Module Active")} className="w-full text-left px-4 py-3 rounded-xl bg-blue-500/10 hover:bg-blue-500/20 border border-blue-500/20 transition-all glow">
