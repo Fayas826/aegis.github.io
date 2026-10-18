@@ -1,4 +1,3 @@
-
 import uuid
 import time
 import asyncio
@@ -18,6 +17,8 @@ from core.execution.universal_dispatch import (
     execution_status,
     universal_mode,
 )
+from core.execution.legacy_action_controller import default_action_controller
+
 
 @dataclass
 class TaskStep:
@@ -34,6 +35,7 @@ class TaskStep:
     ended_at: Optional[float] = None
     rollback_payload: Optional[Dict] = None # Logic to undo this step
 
+
 @dataclass
 class Task:
     task_id: str = field(default_factory=lambda: str(uuid.uuid4()))
@@ -45,9 +47,10 @@ class Task:
     created_at: float = field(default_factory=time.time)
     completed_at: Optional[float] = None
 
+
 class TaskEngine:
-    """🚀 O.M.E.G.A. TASK_ENGINE: Intelligent Execution & Rollback Layer."""
-    
+    """Task orchestration seam: universal by default, legacy by opt-in."""
+
     def __init__(self, controller_callback: Callable, universal_runtime=None):
         self.controller = controller_callback
         self.universal_runtime = universal_runtime
@@ -64,7 +67,7 @@ class TaskEngine:
         for step in task.steps:
             if task.status == "CANCELLED":
                 break
-                
+
             success = await self._execute_step(task, step)
             if success:
                 executed_steps.append(step)
@@ -99,7 +102,7 @@ class TaskEngine:
         step.status = "EXECUTING"
         step.started_at = time.time()
         is_universal = step.action_type.upper() in UNIVERSAL_ACTION_TYPES and universal_mode(step.payload) != "legacy"
-        
+
         while step.retry_count <= step.max_retries:
             if task.status == "CANCELLED" or task.context.get("cancelled"):
                 step.status, step.error = "CANCELLED", "Task cancelled before input."
@@ -109,7 +112,6 @@ class TaskEngine:
                 step.status, step.error = "TIMEOUT", "Task deadline elapsed."
                 return False
             try:
-                # 🧩 SKILL INTEGRATION
                 if step.action_type == "SKILL":
                     skill_name = step.payload.get("skill_name")
                     skill = skill_registry.get_skill(skill_name)
@@ -119,27 +121,25 @@ class TaskEngine:
                         raise Exception(f"Skill not found: {skill_name}")
                 else:
                     result = await self._dispatch_step(task, step)
-                
+
                 step.result = result
                 step.ended_at = time.time()
                 if result_is_success(result):
                     step.status = "SUCCESS"
-                    step.result = result
-                    step.ended_at = time.time()
                     return True
                 elif is_universal or execution_status(result) in {"BLOCKED", "UNAVAILABLE", "PENDING_CONFIRMATION", "CANCELLED", "TIMEOUT", "UNVERIFIED", "VERIFICATION_FAILED"}:
                     step.status = execution_status(result)
                     step.error = result.get("error") or result.get("detail") or step.status
-                    return False  # Worker owns bounded recovery; never replay a mission blindly.
+                    return False
                 else:
                     raise Exception(result.get("error", "Execution fail"))
-                    
-            except Exception as e:
+
+            except Exception as exc:
                 if is_universal:
-                    step.status, step.error = "FAILED", str(e)
+                    step.status, step.error = "FAILED", str(exc)
                     return False
                 step.retry_count += 1
-                step.error = str(e)
+                step.error = str(exc)
                 if step.retry_count > step.max_retries:
                     step.status = "FAILED"
                     return False
@@ -147,20 +147,17 @@ class TaskEngine:
         return False
 
     async def _dispatch_step(self, task: Task, step: TaskStep) -> Dict:
-        """Use universal execution by default, with a per-step legacy escape hatch.
+        """Dispatch universal steps to the canonical runtime.
 
-        The old controller remains intact and is selected with
-        ``payload.execution_mode = 'legacy'``.  This lets existing workflows
-        migrate incrementally without making app-specific actions disappear.
+        Legacy actions are kept behind the separately named compatibility
+        controller and are reached only by an explicit legacy mode.
         """
 
         if step.action_type.upper() in UNIVERSAL_ACTION_TYPES and universal_mode(step.payload) != "legacy":
             from core.orchestration.agent_contract import TaskContext
+
             surface = step.payload.get("surface") if isinstance(step.payload, dict) else None
             goal = goal_for_action(step.action_type, step.payload, step.description)
-            # Planner/model-authored node payloads cannot grant filesystem
-            # authority or define their own verification predicate. Only the
-            # host-owned task context supplies those. A node may narrow access.
             parameters = {key: task.context[key] for key in
                           ("allowed_roots", "evidence_dir", "verification", "desktop_allowed") if key in task.context}
             if step.payload.get("desktop_allowed") is False:
@@ -176,52 +173,64 @@ class TaskEngine:
                 metadata={"parent_task_id": task.task_id})
             context.cancel_check = lambda: task.status == "CANCELLED" or bool(task.context.get("cancelled"))
             return await execute_universal_goal(goal, surface=surface, task_context=context,
-                runtime=getattr(self, "universal_runtime", None))
+                                               runtime=getattr(self, "universal_runtime", None))
         return await self.controller(step.action_type, step.payload)
 
     async def _rollback_task(self, steps: List[TaskStep]):
-        """Undoes successful steps in reverse order."""
+        """Undo successful legacy steps in reverse order."""
         for step in reversed(steps):
             if step.rollback_payload:
                 print(f"[ROLLBACK] Undoing: {step.description}")
                 await self.controller(step.rollback_payload.get("action_type"), step.rollback_payload.get("payload"))
 
     def _is_step_safe(self, step: TaskStep) -> bool:
-        # Enforce Hard Safety Rules
         action = step.action_type
         payload = step.payload
         if action == "FILE_OP":
             path = payload.get("path", "").lower()
-            if any(p in path for p in ["core/", "system/", "config/"]): return False
-            if payload.get("operation") == "delete" and "data/temp" not in path: return False
+            if any(p in path for p in ["core/", "system/", "config/"]):
+                return False
+            if payload.get("operation") == "delete" and "data/temp" not in path:
+                return False
         if action == "OS_COMMAND":
             cmd = payload.get("command", "").lower()
-            if any(t in cmd for t in ["rm -rf", "del /s", "format", "reg delete"]): return False
+            if any(t in cmd for t in ["rm -rf", "del /s", "format", "reg delete"]):
+                return False
         return True
 
     def _archive_task(self, task: Task):
         try:
             history = []
             if os.path.exists(self.history_path):
-                with open(self.history_path, 'r') as f: history = json.load(f)
-            
+                with open(self.history_path, "r") as handle:
+                    history = json.load(handle)
+
             history.append({
                 "id": task.task_id,
                 "intent": task.original_intent,
                 "status": task.status,
                 "duration": (task.completed_at - task.created_at) if task.completed_at else 0,
-                "timestamp": datetime.now().isoformat()
+                "timestamp": datetime.now().isoformat(),
             })
-            with open(self.history_path, 'w') as f: json.dump(history[-100:], f, indent=4)
-        except: pass
+            with open(self.history_path, "w") as handle:
+                json.dump(history[-100:], handle, indent=4)
+        except Exception:
+            pass
 
-# Global instance
+
 task_engine = None
 
-def init_task_engine(controller):
+
+def init_task_engine(controller=None, universal_runtime=None):
+    """Initialize the singleton, retaining an explicit legacy seam."""
     global task_engine
-    task_engine = TaskEngine(controller)
+    task_engine = TaskEngine(controller or default_action_controller, universal_runtime=universal_runtime)
     return task_engine
 
+
 def get_task_engine():
+    """Return a usable engine even when no startup hook ran."""
+    global task_engine
+    if task_engine is None:
+        task_engine = TaskEngine(default_action_controller)
     return task_engine
