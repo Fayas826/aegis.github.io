@@ -1,0 +1,9 @@
+{
+  "short_name": "Zenith HUD",
+  "name": "O.M.E.G.A. Zenith Tactical Interface",
+  "icons": [],
+  "start_url": "/?mode=mini",
+  "background_color": "#000000",
+  "display": "standalone",
+  "theme_color": "#00f0ff"
+}
